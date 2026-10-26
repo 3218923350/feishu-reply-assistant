@@ -139,7 +139,7 @@ async function setup({ noStart = false } = {}) {
     ]) {
       const before = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
       const r = change(before);
-      if (!r.changed) { done(`${what}（${file}）`); continue; }
+      if (!r.changed || (file.endsWith('CLAUDE.md') && !before.includes('feishu-reply-assistant:mem') && /mem search/.test(before))) { done(`${what}（${file}）`); continue; } // 已经自己写过就不重复加
       if (!(await yes(`在 ${file} 装上${what}？`, true))) continue;
       const bak = `${file}.bak-${stamp()}`;
       if (before) fs.copyFileSync(file, bak);

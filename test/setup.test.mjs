@@ -299,3 +299,11 @@ test('initMemoryDir：git 提交失败（没配名字邮箱）→ 报错说怎�
   const run = async (cmd, args) => (args.includes('commit') ? { code: 128, out: '', err: 'Please tell me who you are' } : args.includes('--show-toplevel') ? { code: 128, out: '', err: '' } : { code: 0, out: '', err: '' });
   await assert.rejects(initMemoryDir(dir, run), /git config --global user\.email/);
 });
+
+test('runChecks：CLAUDE.md 里已经有自己写的「先 mem search」说明（没带标记）也算装好了', async () => {
+  const f = okFixture();
+  fs.writeFileSync(path.join(f.home, '.claude', 'CLAUDE.md'), '# 我的规则\n## 共享记忆\n动手前先跑 `mem search <关键词>`\n');
+  assert.equal(byName(await runChecks(f.opts), '全局 CLAUDE.md').ok, true);
+  fs.writeFileSync(path.join(f.home, '.claude', 'CLAUDE.md'), '# 我的规则\n');
+  assert.equal(byName(await runChecks(f.opts), '全局 CLAUDE.md').ok, false);
+});
