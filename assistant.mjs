@@ -812,9 +812,11 @@ if (process.argv.includes('--once')) {
   process.exit(0);
 }
 const dryId = process.argv.indexOf('--dry');
+const idArg = (i, flag) => { const v = process.argv[i + 1]; if (!/^om_/.test(v || '')) { console.error(`用法：node assistant.mjs ${flag} om_xxx（飞书消息的 message_id）`); process.exit(2); } return v; };
 if (dryId > -1) {
   // 只起草打印，不发卡片、不改状态（回放历史消息看效果/成本）
-  const d = await lark(['im', '+messages-mget', '--as', 'user', '--message-ids', process.argv[dryId + 1], '--no-reactions']);
+  const d = await lark(['im', '+messages-mget', '--as', 'user', '--message-ids', idArg(dryId, '--dry'), '--no-reactions']);
+  if (!d.messages?.length) { console.error(`查不到这条消息：${process.argv[dryId + 1]}`); process.exit(2); }
   const r = await draftFor([d.messages[0]], { force: true });
   console.log(JSON.stringify(r.res, null, 1));
   process.exit(0);
@@ -822,7 +824,8 @@ if (dryId > -1) {
 const testId = process.argv.indexOf('--test');
 if (testId > -1) {
   // 对指定 message_id 走一遍完整流程（会往草稿群发）
-  const d = await lark(['im', '+messages-mget', '--as', 'user', '--message-ids', process.argv[testId + 1], '--no-reactions']);
+  const d = await lark(['im', '+messages-mget', '--as', 'user', '--message-ids', idArg(testId, '--test'), '--no-reactions']);
+  if (!d.messages?.length) { console.error(`查不到这条消息：${process.argv[testId + 1]}`); process.exit(2); }
   await processBatch([d.messages[0]]);
   process.exit(0);
 }

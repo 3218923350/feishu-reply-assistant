@@ -116,3 +116,20 @@ test('好几个 mem 同时刷新过期的索引：都成功，同一个文件不
   const db = new DatabaseSync(path.join(f.mem, '.mem-index.sqlite'));
   assert.equal(db.prepare('SELECT COUNT(*) n FROM docs').get().n, db.prepare('SELECT COUNT(DISTINCT path) n FROM docs').get().n);
 });
+
+test('mem add：缺必填字段（比如把正文写成 body）→ 拒收，说清是第几条缺了什么，什么都不写', () => {
+  const f = fixture();
+  const r = f.run(MEM, ['add', '-'], JSON.stringify([{ type: 'fact', title: '网关地址', entities: [], scope: '', body: 'x', sources: ['s#1'], observed: '2026-10-22', confidence: 'high', review: 'auto' }]));
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /第 1 条.*content/);
+  assert.ok(!fs.existsSync(path.join(f.mem, 'facts')));
+});
+
+test('mem：输入不是 JSON、reject 不在待确认里的条目 → 一行人话，不甩堆栈', () => {
+  const f = fixture();
+  for (const [args, input] of [[['add', '-'], 'not json'], [['reject', path.join(f.mem, 'recipes', '白名单.md')], '']]) {
+    const r = f.run(MEM, args, input);
+    assert.notEqual(r.status, 0, args.join(' '));
+    assert.ok(r.stderr.trim() && !/\n\s+at /.test(r.stderr), r.stderr);
+  }
+});

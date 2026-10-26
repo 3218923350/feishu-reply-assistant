@@ -41,7 +41,7 @@ const byName = (r, n) => r.find((c) => c.name === n);
 
 test('runChecks：全部配好 → 都是 ✅（Orca 没开是 ⏭）；顺序和名字固定', async () => {
   const r = await runChecks(okFixture().opts);
-  assert.deepEqual(r.map((c) => c.name), ['系统是 macOS', 'Node ≥ 24', 'Claude Code', 'lark-cli', '配置文件', '关于我', '飞书用户身份', '机器人身份', '草稿群',
+  assert.deepEqual(r.map((c) => c.name), ['系统是 macOS', 'Node ≥ 24', 'Claude Code', 'lark-cli', 'git', '配置文件', '关于我', '飞书用户身份', '机器人身份', '草稿群',
     '卡片回调', '记忆目录', '记忆检索', 'Claude Code 记忆 hook', '全局 CLAUDE.md', 'mem 命令', '常驻服务', '每日任务', 'Orca（可选）']);
   assert.deepEqual(r.filter((c) => c.ok === false).map((c) => `${c.name}：${c.detail}`), []);
   assert.equal(byName(r, 'Orca（可选）').ok, null);
@@ -186,9 +186,9 @@ test('runChecks：记忆目录在别的 git 仓库里面 → ❌（提交会进�
 test('runChecks：limit 只跑前几项（setup 第一步用），不碰飞书、不碰 launchd', async () => {
   const calls = [];
   const f = okFixture();
-  const r = await runChecks({ ...f.opts, limit: 4, run: async (c, a, o) => { calls.push(c); return f.run(c, a, o); } });
-  assert.equal(r.length, 4);
-  assert.ok(!calls.includes('launchctl') && !calls.includes('git'));
+  const r = await runChecks({ ...f.opts, limit: 5, run: async (c, a, o) => { calls.push(c); return f.run(c, a, o); } });
+  assert.equal(r.length, 5);
+  assert.ok(!calls.includes('launchctl'));
 });
 
 test('anonymize：多行正文的后续行也去掉，直到下一条带时间戳的日志；错误的续行保留', () => {
@@ -265,4 +265,37 @@ test('runChecks：关于我还是模板原样（setup 复制过去没改）→ �
 test('anonymize：ALERT 和 ERR jsonl 行里带的消息正文也去掉', () => {
   const t = anonymize('2026-10-26T01:00:00Z ALERT drop 这条连续 3 次没处理成功，放弃了：李四「帮我开个号」\n2026-10-26T01:00:01Z ERR jsonl /x/events.jsonl {"text":"key 给你"', { names: ['李四'] });
   assert.equal(t, '2026-10-26T01:00:00Z ALERT drop: …\n2026-10-26T01:00:01Z ERR jsonl: …');
+});
+
+const PTY_PROG = "// 在伪终端里跑：先用 prompter 问一句，再起一个按行读终端的子进程（像 coldstart.sh 的 read），最后再问一句\nimport { makePrompter } from '__PROMPTER__';\nconst p = makePrompter();\nconst first = await p.ask('第一问');\np.interactive('bash', ['-c', 'read -r a; echo \"child-got:$a\"']);\nconst last = await p.ask('最后一问');\nconsole.log(`first:${first} last:${last}`);\np.close();\n";
+test('setup 的提问和交互子进程交替：子进程能正常读到终端输入（readline 不能一直占着终端）', async (t) => {
+  const { spawnSync } = await import('node:child_process');
+  if (!fs.existsSync('/usr/bin/script')) return t.skip('没有 script 命令');
+  // macOS 的 script：把 stdin 转给一个伪终端里的程序。每行之间留点时间，让程序先走到对应的 read
+  const feed = `(sleep 1; printf 'aaa\\r'; sleep 1; printf 'hello\\r'; sleep 1; printf 'zzz\\r'; sleep 1)`;
+  // 小程序写到临时目录（放在 test/ 下会被 node --test 当成测试跑，它等终端输入就一直不退出）
+  const prog = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pty-')), 'prompter-pty.mjs');
+  fs.writeFileSync(prog, PTY_PROG.replace('__PROMPTER__', path.resolve('lib/setup/prompter.mjs')));
+  const r = spawnSync('bash', ['-c', `${feed} | /usr/bin/script -q /dev/null ${JSON.stringify(process.execPath)} ${JSON.stringify(prog)}`], { encoding: 'utf8', timeout: 20_000 });
+  assert.match(r.stdout, /child-got:hello/, r.stdout);
+  assert.match(r.stdout, /first:aaa last:zzz/, r.stdout);
+});
+
+test('install.sh 启动后去掉 .no-start 标记（不然 doctor 一直跳过常驻服务检查）', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'inst-ns-'));
+  const fra = path.join(home, 'fra'), fake = path.join(home, 'fakebin');
+  fs.mkdirSync(path.join(home, 'Library', 'LaunchAgents'), { recursive: true }); fs.mkdirSync(fra); fs.mkdirSync(fake);
+  fs.writeFileSync(path.join(fra, 'config.json'), JSON.stringify({ name: '张三', open_id: 'ou_me', draft_chat_id: 'oc_draft', launchd_label: 'com.test.fra-never-real-ns' }));
+  fs.writeFileSync(path.join(fra, '.no-start'), '');
+  fs.writeFileSync(path.join(fake, 'launchctl'), '#!/bin/bash\necho "state = running"\n', { mode: 0o755 });
+  const r = spawnSync('bash', ['install.sh'], { env: { ...process.env, HOME: home, FRA_HOME: fra, PATH: `${fake}:${path.dirname(process.execPath)}:/usr/bin:/bin` }, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.ok(!fs.existsSync(path.join(fra, '.no-start')));
+});
+
+test('initMemoryDir：git 提交失败（没配名字邮箱）→ 报错说怎么修，不当成功', async () => {
+  const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'memdir-ng-')), 'memory');
+  const run = async (cmd, args) => (args.includes('commit') ? { code: 128, out: '', err: 'Please tell me who you are' } : args.includes('--show-toplevel') ? { code: 128, out: '', err: '' } : { code: 0, out: '', err: '' });
+  await assert.rejects(initMemoryDir(dir, run), /git config --global user\.email/);
 });

@@ -27,7 +27,7 @@ A Feishu (Lark) reply assistant for one person on one Mac. It watches messages t
 
 ## 需要什么
 
-- macOS，Node 24 或更新（记忆检索用 `node:sqlite`），python3（系统自带的就行）
+- macOS，Node 24 或更新（记忆检索用 `node:sqlite`），python3 和 git（系统自带的就行；没有的话 `xcode-select --install`）
 - [Claude Code](https://claude.com/claude-code)，已经登录
 - [lark-cli](https://github.com/larksuite/cli)（`npm i -g @larksuite/cli`），以及一个**飞书企业自建应用**（建法和要开的权限见 docs/feishu-app.md；公司租户发布应用一般要管理员审核）
 - 可选：Orca（多 agent 终端和内置浏览器）。装了而且开着时，办事在 Orca 终端里跑，你能看着、能插话；外部群（程序不能以你身份发的）用 Orca 内置浏览器里的网页版飞书替你发。没装也能完整使用：办事在后台跑，过程写日志；外部群的回复放剪贴板让你手动发。
@@ -37,8 +37,9 @@ A Feishu (Lark) reply assistant for one person on one Mac. It watches messages t
 ```bash
 git clone https://github.com/3218923350/feishu-reply-assistant.git
 cd feishu-reply-assistant
-bin/fra setup          # 一路引导：飞书应用、登录、草稿群、配置、记忆目录、Claude Code hook、常驻服务、冷启动
-# 改 ~/.feishu-reply-assistant/about-me.md：你是谁、负责什么、常用仓库（草稿像不像你，主要看它）
+bin/fra setup          # 一路引导：飞书应用、登录、草稿群、配置、记忆目录、Claude Code hook，最后问要不要启动常驻服务、跑冷启动
+#   setup 复制好「关于我」后，先把 $FRA_HOME/about-me.md 改成你自己的（你是谁、负责什么、常用仓库），再让它启动服务
+#   （草稿像不像你，主要看它；没改的话 setup 默认不启动，改好后跑 ./install.sh）
 bin/fra doctor         # 逐项检查，哪项没通会告诉你怎么修
 ```
 
@@ -50,15 +51,15 @@ setup 做的事：
 3. 问机器人是否用同一个应用（默认是，最省事）；用机器人建「飞书回复草稿箱」群并把你拉进去。
 4. 写 `~/.feishu-reply-assistant/config.json`，复制「关于我」模板。
 5. 建记忆目录（本机 git 仓库，不配远端）。
-6. 在 Claude Code 里装记忆 hook（每次提问自动带上相关记忆）和「先 `mem search`」那段全局说明；把 `mem` 命令链到 `~/.local/bin`。
-7. 装两个 launchd 服务（常驻助手 + 每天 06:30 的记忆日报）。改了代码之后重跑 `./install.sh` 就是重启。
+6. 在 Claude Code 里装记忆 hook（每次提问自动带上相关记忆）和「先 `mem search`」那段全局说明；把 `mem` 命令链到 `~/.local/bin`（`~/.local/bin` 不在 PATH 里时只提示、不链）。
+7. 问你要不要现在启动两个 launchd 服务（常驻助手 + 每天 06:30 的记忆日报）。启动后每 90 秒以你的身份搜一次消息，开始处理时会在对方消息上点「了解」表情，这是对外可见的。改了代码之后重跑 `./install.sh` 就是重启。
 8. 问要不要冷启动：从最近 30 天的飞书抽记忆（scripts/coldstart.sh，先拉消息、报批次数，再问一次，会花 Claude 的钱）。
 
-doctor 检查的项：系统是 macOS、Node ≥ 24、Claude Code、lark-cli、配置文件、关于我、飞书用户身份、机器人身份、草稿群、卡片回调、记忆目录、记忆检索、Claude Code 记忆 hook、全局 CLAUDE.md、mem 命令、常驻服务、每日任务、Orca（可选）。
+doctor 检查的项：系统是 macOS、Node ≥ 24、Claude Code、lark-cli、git、配置文件、关于我、飞书用户身份、机器人身份、草稿群、卡片回调、记忆目录、记忆检索、Claude Code 记忆 hook、全局 CLAUDE.md、mem 命令、常驻服务、每日任务、Orca（可选）。
 
 ## 配置
 
-数据目录默认 `~/.feishu-reply-assistant/`（设环境变量 `FRA_HOME` 可以换）。里面：
+数据目录默认 `~/.feishu-reply-assistant/`。要换就设环境变量 `FRA_HOME`，而且要写进 `~/.zshrc` 并在跑 setup / install.sh 之前生效：常驻服务用的是 install.sh 写进 launchd 的值，而 Claude Code 的记忆 hook、日常 `mem`、手动跑的脚本读的是 shell 里的值，两边不一致就会各读各的目录。下文的 `$FRA_HOME` 没设时就是 `~/.feishu-reply-assistant`。里面：
 
 - `config.json`：见下表，模板在 templates/config.example.json
 - `about-me.md`：关于你的说明，原样拼进起草时的系统提示词。模板在 templates/about-me.md
@@ -95,8 +96,8 @@ doctor 检查的项：系统是 macOS、Node ≥ 24、Claude Code、lark-cli、�
 
 ```bash
 node assistant.mjs --dry om_xxx   # 对某条消息只起草、打印结果（看效果 / 成本），不发卡片
-tail -f ~/.feishu-reply-assistant/assistant.log
-scripts/daily.sh 2026-10-22       # 手动跑某天的增量记忆 + 日报（同一天只入库一次，FORCE=1 重跑）
+tail -f ${FRA_HOME:-~/.feishu-reply-assistant}/assistant.log
+scripts/daily.sh 2026-10-22       # 手动跑某天的增量记忆 + 日报（同一天只入库一次；FORCE=1 强制重跑，会把同样的事实再追加一遍，确认上次没入库再用）
 mem review                        # 列出待确认的记忆
 ```
 
@@ -117,6 +118,8 @@ mem review                        # 列出待确认的记忆
 
 - **公司租户发布应用要管理员审核**：开机器人能力、订阅卡片回调、加权限之后都要发布新版本，可能要等管理员批。
 - **按钮点了没反应**：`bin/fra doctor` 看「卡片回调」和「机器人身份」。同一个应用同一时间只能有一个进程收卡片回调，别在别处再起 `lark-cli event consume card.action.trigger`。两个应用时检查 `bot_open_id` 是不是你在机器人应用下的 open_id。
+- **用户授权失败 / 建草稿群报 232043**：应用的「可用范围」里没有你自己。在开放平台 → 应用发布 → 可用范围里加上你，发一版再重跑 setup。
+- **记忆 hook 好像没生效**：从程序坞打开的 Claude Code 可能没加载你 shell 里的 PATH（比如 nvm 装的 node），hook 找不到 node 就静默跳过。在终端里启动 claude 试试，或者让 node 在系统 PATH 里也能找到。
 - **外部群发不出去**：飞书不允许程序以你的身份往外部群 / 外部私聊发（错误码 230027）。装了 Orca 并配了 `messenger_url` 会用网页版替你发；否则草稿放剪贴板，卡片上提示你手动发。
 
 ## 反馈
@@ -126,9 +129,9 @@ mem review                        # 列出待确认的记忆
 ## 开发
 
 ```bash
-node --test && for t in test/test_*.py; do python3 "$t" || exit 1; done
+node --test && (for t in test/test_*.py; do python3 "$t" || exit 1; done)
 git config core.hooksPath .githooks   # 推送前自动跑清理检查
-node scripts/check-clean.mjs          # 会发布的文件里有没有个人 / 内部信息（黑名单放在 $FRA_HOME/clean-blocklist.txt，不进仓库）
+node scripts/check-clean.mjs          # 会发布的文件里有没有个人 / 内部信息（黑名单放在 $FRA_HOME/clean-blocklist.txt，一行一个词，# 开头是注释，不分大小写；不进仓库）
 ```
 
 代码结构：assistant.mjs 主程序；lib/ 各模块（lib/config.mjs 配置、lib/prefetch.mjs 预取、lib/cards.mjs 卡片、lib/fr.mjs 发送规则、lib/promise.mjs 拦承诺、lib/memory/ 记忆引擎）；bin/ 命令（bin/fra、bin/fr、bin/mem、bin/mem-hook）；scripts/ 每日记忆管线和冷启动；prompt.md 起草的系统提示词。

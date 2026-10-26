@@ -68,6 +68,22 @@ function print(hits) {
   if (!hits.length) console.log('（没有命中）');
 }
 
+// 用户常见的用错（输入不是 JSON、路径不对）给一行人话，不甩堆栈
+const fail = (msg) => { console.error(msg); process.exit(2); };
+process.on('uncaughtException', (e) => fail(`mem：${e.message}`));
+process.on('unhandledRejection', (e) => fail(`mem：${e?.message || e}`));
+
+// mem add 的每一条都要有 schema 里的必填字段（正文叫 content）；缺了就整批拒收，什么都不写
+const SCHEMA = JSON.parse(fs.readFileSync(new URL('../schema/memory.json', import.meta.url), 'utf8'));
+function checkItems(items) {
+  const bad = items.flatMap((it, i) => {
+    const miss = SCHEMA.required.filter((k) => it?.[k] == null || (k === 'content' && !String(it[k]).trim()));
+    const enums = Object.entries(SCHEMA.properties).filter(([k, v]) => v.enum && it?.[k] != null && !v.enum.includes(it[k])).map(([k, v]) => `${k} 只能是 ${v.enum.join(' / ')}`);
+    return miss.length || enums.length ? [`第 ${i + 1} 条${it?.title ? `「${it.title}」` : ''}：${[miss.length ? `缺 ${miss.join('、')}` : '', ...enums].filter(Boolean).join('；')}`] : [];
+  });
+  if (bad.length) fail(`mem add 没写入（字段见 schema/memory.json，格式见 docs/MEMORY.md）：\n${bad.join('\n')}`);
+}
+
 const [cmd, ...rest] = process.argv.slice(2);
 const { opts, pos } = parseArgs(rest);
 const out = (v) => (opts.json ? console.log(JSON.stringify(v, null, 1)) : null);
@@ -86,8 +102,11 @@ switch (cmd) {
   }
   case 'add': {
     const src = pos[0] && pos[0] !== '-' ? fs.readFileSync(pos[0], 'utf8') : fs.readFileSync(0, 'utf8');
+    let items;
+    try { items = parseItems(src); } catch (e) { fail(`mem add：输入要是 JSON 数组或一行一个 JSON（${e.message}）`); }
+    checkItems(items);
     const results = await withLock(MEM_DIR, () => {
-      const r = addItems(MEM_DIR, parseItems(src));
+      const r = addItems(MEM_DIR, items);
       commit(opts.message || `mem add: ${r.length} 条`);
       return r;
     });

@@ -115,3 +115,11 @@ test('expandBotEnv：setup 还没写配置时，机器人环境变量里的 ~ �
   assert.deepEqual(expandBotEnv({ LARKSUITE_CLI_CONFIG_DIR: '~/.lark-bot' }, '/home/u'), { LARKSUITE_CLI_CONFIG_DIR: '/home/u/.lark-bot' });
   assert.deepEqual(expandBotEnv(undefined, '/home/u'), {});
 });
+
+test('照模板原样复制：记忆目录在 FRA_HOME 下，没有示例上级', () => {
+  const t = JSON.parse(fs.readFileSync('templates/config.example.json', 'utf8'));
+  const { home, fra } = fixture({ ...t, name: '张三', open_id: 'ou_me', draft_chat_id: 'oc_draft' });
+  const c = loadConfig({ env: { FRA_HOME: fra }, home });
+  assert.equal(c.memoryDir, path.join(fra, 'memory'));
+  assert.deepEqual(c.leaders, []);
+});

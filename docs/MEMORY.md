@@ -51,13 +51,22 @@ key、token、密码可以原样写进记忆（写清是谁的、做什么用、
 ## mem 命令
 
 ```bash
-mem search <关键词> [--type policy] [--limit 8] [--scope mine|all] [--json]
+mem search <关键词> [--type policy] [--limit 8] [--scope mine|all] [--json]   # all（默认）连带各项目的 Claude / Codex 记忆；mine 只搜记忆库
 mem who <姓名|open_id> [--id ou_xxx] [--json]   # 人物卡（带 open_id 时按 id 精确找）+ 相关口径 / 事项
 mem add [文件|-] [--message 提交说明]          # JSON 数组或 JSONL，字段见 schema/memory.json
 mem review [--json]                            # 列出待确认
-mem accept <路径> / mem reject <路径>
+mem accept <路径> / mem reject <路径>          # 只处理 inbox 里待确认的；已经入库的条目写错了，直接改或删那个 .md 文件再 git commit
 mem reindex                                    # 重建检索索引（平时每次搜索会自动增量刷新）
 ```
+
+`mem add` 的输入是 JSON 数组（或一行一个 JSON），每条都要有这些字段，缺了整批拒收：
+
+```json
+[{"type": "fact", "title": "网关地址", "entities": ["网关"], "scope": "prod", "content": "2026-01-05 网关地址是 https://gw.example.com/v1",
+  "sources": ["私聊 李四#om_xxx"], "observed": "2026-01-05", "confidence": "high", "review": "auto"}]
+```
+
+正文写在 `content`（多条事实用换行分开，每行以日期开头）；`review` 填 `auto` 或 `pending`；`updated` 由程序填。已有同类型、同标题（人物按姓名 / open_id）的条目时，会追加到那一条而不是新建。
 
 检索是 SQLite 全文索引，中文按相邻两个字切词；配置里的 `aliases` 可以补同义词（比如口语里的「开个 key」对应记忆里的「开通 key」）。
 

@@ -3,8 +3,6 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
-import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 import { BIN, botEnv, expandBotEnv, fraHome, loadConfig } from '../lib/config.mjs';
 import { run } from '../lib/run.mjs';
@@ -12,6 +10,7 @@ import { runChecks } from '../lib/setup/checks.mjs';
 import { MEM_SNIPPET, addSnippet, hookCommand, mergeHook } from '../lib/setup/claude.mjs';
 import { initMemoryDir } from '../lib/setup/memdir.mjs';
 import { draftGroupStep, isOpenId, ownerIdStep } from '../lib/setup/steps.mjs';
+import { makePrompter } from '../lib/setup/prompter.mjs';
 import { anonymize, reportNames } from '../lib/setup/report.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -54,10 +53,7 @@ const json = (r) => { try { return JSON.parse(r.out.slice(r.out.indexOf('{'))); 
 async function setup({ noStart = false } = {}) {
   // 每一步都要人点头（改 ~/.claude、建飞书群、装 launchd）：不在交互终端里（被脚本或 agent 调起）就不跑，免得默认答案替人同意
   if (!process.stdin.isTTY || !process.stdout.isTTY) { console.error('bin/fra setup 要在终端里交互着跑（它会改 ~/.claude、建草稿群、装 launchd，每一步都要你确认）'); process.exitCode = 1; return; }
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  const ask = async (q, def = '') => ((await rl.question(`${q}${def ? `（默认 ${def}）` : ''}：`)).trim() || def);
-  const yes = async (q, def = true) => { const a = (await rl.question(`${q} [${def ? 'Y/n' : 'y/N'}] `)).trim().toLowerCase(); return a ? a.startsWith('y') : def; };
-  const interactive = (cmd, args, env = process.env) => spawnSync(cmd, args, { stdio: 'inherit', env }).status === 0;
+  const { ask, yes, interactive, close } = makePrompter(); // 起交互子进程前会先放开终端
   const { lark } = BIN();
   const home = fraHome();
   const cfgFile = path.join(home, 'config.json');
@@ -66,9 +62,9 @@ async function setup({ noStart = false } = {}) {
   const next = { ...existing };
   try {
     // 1. 基础依赖
-    const pre = await runChecks({ load: () => loadConfig(), run, repo: REPO, limit: 4 });
+    const pre = await runChecks({ load: () => loadConfig(), run, repo: REPO, limit: 5 });
     if (pre.some((c) => c.ok === false)) { console.log(show(pre)); process.exitCode = 1; return; }
-    done('macOS / Node / Claude Code / lark-cli');
+    done('macOS / Node / Claude Code / lark-cli / git');
 
     // 2. 飞书应用 + 3. 用户身份登录
     let user = json(await run(lark, ['auth', 'status'])).identities?.user;
@@ -110,6 +106,7 @@ async function setup({ noStart = false } = {}) {
     const step = draftGroupStep({ id: existing.draft_chat_id, list, me });
     if (step === 'error') throw new Error(`查草稿群 ${existing.draft_chat_id} 失败（${JSON.stringify(list?.error || list).slice(0, 160)}）：稍后重跑；不会另建一个群`);
     if (step === 'keep' || (step === 'ask' && !(await yes(`你不在草稿群 ${existing.draft_chat_id} 里（或机器人看不到你）。另建一个新的草稿群？`, false)))) done(`草稿群 ${existing.draft_chat_id}`);
+    else if (!(await yes('用机器人建一个「飞书回复草稿箱」群（只有你和机器人），草稿卡片都发到这里？', true))) throw new Error('没有草稿群就没法用：想用已有的群，把它的 chat_id 写进 config.json 的 draft_chat_id 再重跑');
     else {
       const r = json(await run(lark, ['im', '+chat-create', '--as', 'bot', '--name', '飞书回复草稿箱', '--users', me, '--owner', me], { env: bot() }));
       const id = r.data?.chat_id;
@@ -158,13 +155,17 @@ async function setup({ noStart = false } = {}) {
       const link = path.join(local, 'mem');
       const cur = (() => { try { return fs.realpathSync(link); } catch { return null; } })();
       if (cur === fs.realpathSync(path.join(REPO, 'bin', 'mem'))) done('mem 命令');
-      else if (!cur || await yes(`${link} 现在指向 ${cur}，改成指向这个仓库的 bin/mem？`, true)) { fs.rmSync(link, { force: true }); fs.symlinkSync(path.join(REPO, 'bin', 'mem'), link); console.log(`✓ ${link} → ${REPO}/bin/mem`); }
+      else if (await yes(cur ? `${link} 现在指向 ${cur}，改成指向这个仓库的 bin/mem？` : `建 ${link} → 这个仓库的 bin/mem（日常在 Claude Code 里用 mem 命令）？`, true)) { fs.rmSync(link, { force: true }); fs.symlinkSync(path.join(REPO, 'bin', 'mem'), link); console.log(`✓ ${link} → ${REPO}/bin/mem`); }
     } else console.log(`⚠️ ~/.local/bin 不在 PATH 里：自己把 ${REPO}/bin/mem 链到 PATH 里的某个目录（日常 Claude Code 里要用 mem 命令）`);
 
     // 10. 常驻服务
     const mark = path.join(home, '.no-start');
-    if (noStart) { fs.writeFileSync(mark, ''); console.log('⏭ 没启动常驻服务（--no-start）；要启动就跑 ./install.sh'); }
-    else { fs.rmSync(mark, { force: true }); if (!interactive(path.join(REPO, 'install.sh'), [])) throw new Error('install.sh 失败'); }
+    const install = path.join(REPO, 'install.sh');
+    const aboutReady = !(await runChecks({ load: () => loadConfig(), run, repo: REPO })).some((c) => c.name === '关于我' && c.ok === false);
+    if (!aboutReady) console.log(`\n⚠️ 关于我还没改（${path.join(home, 'about-me.md')}）：现在启动的话，草稿会照着模板里的示例身份写。建议先改好再启动。`);
+    const start = !noStart && await yes(`现在启动常驻服务和每天 06:30 的记忆日报？启动后每 90 秒以你的身份搜一次消息，开始处理时在对方消息上点「了解」表情`, aboutReady);
+    if (!start) { fs.writeFileSync(mark, ''); console.log(`⏭ 没启动常驻服务；准备好了跑 ${install}`); }
+    else { fs.rmSync(mark, { force: true }); if (!interactive(install, [])) throw new Error('install.sh 失败'); }
 
     // 11. 冷启动
     if (await yes('现在跑冷启动吗？从最近 30 天的飞书里抽记忆（先拉消息、告诉你有多少批，再问一次；会花 Claude 的钱）', false)) {
@@ -174,7 +175,7 @@ async function setup({ noStart = false } = {}) {
     console.log(`\n❌ ${e.message}\n修好以后重跑 bin/fra setup，做过的步骤会跳过。`);
     process.exitCode = 1;
     return;
-  } finally { rl.close(); }
+  } finally { close(); }
 
   // 12. 检查一遍
   console.log('\n—— bin/fra doctor ——');

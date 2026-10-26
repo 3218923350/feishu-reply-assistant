@@ -6,10 +6,11 @@
 
 1. 打开飞书开放平台（open.feishu.cn）→ 开发者后台 → 创建企业自建应用，名字随意（比如「张三的回复助手」）。
 2. 「添加应用能力」→ 加上**机器人**。
-3. 「权限管理」→ 开通下面两张表里的权限。
-4. 「事件与回调」→「回调配置」→ 订阅方式选**使用长连接接收回调**，添加回调 `card.action.trigger`（卡片回传交互）。
-5. 「版本管理与发布」→ 创建版本、申请发布。公司租户一般要管理员审核；之后每次改权限、改回调都要再发一次版本。
-6. 本机跑 `lark-cli config init`，按提示填 App ID 和 App Secret（`bin/fra setup` 会帮你调起）。
+3. 「应用发布」→「可用范围」里至少加上你自己（不然用户授权会失败，机器人建群拉你进去会报 232043）。
+4. 「权限管理」→ 开通下面两张表里的权限。
+5. 「事件与回调」→「回调配置」→ 订阅方式选**使用长连接接收回调**，添加回调 `card.action.trigger`（卡片回传交互）。如果保存时提示没检测到长连接：先把后面的 lark-cli 配好，临时跑一下 `lark-cli event consume card.action.trigger --as bot`，保存成功后 Ctrl-C 关掉（常驻服务起来以后由它来收，别同时开两个）。
+6. 「版本管理与发布」→ 创建版本、申请发布。公司租户一般要管理员审核；之后每次改权限、改回调都要再发一次版本。
+7. 本机跑 `lark-cli config init`，按提示填 App ID 和 App Secret（`bin/fra setup` 会帮你调起）。
 
 ## 二、权限
 
@@ -18,7 +19,7 @@
 | 用来做什么 | 命令 | 权限 |
 |---|---|---|
 | 搜 @我 / 私聊我的消息 | `im +messages-search` | `search:message` |
-| 拉会话上下文、话题、卡片 | `im +chat-messages-list`、`im +threads-messages-list`、`im +messages-mget` | `im:message:readonly`、`im:message.group_msg:get_as_user`、`im:message.p2p_msg:get_as_user`、`im:chat:read` |
+| 拉会话上下文、话题、卡片 | `im +chat-messages-list`、`im +threads-messages-list`、`im +messages-mget` | `im:message:readonly`、`im:message.group_msg:get_as_user`、`im:message.p2p_msg:get_as_user`、`im:chat:read`、`contact:user.base:readonly` |
 | 以你的身份回复 / 发消息（发送、`bin/fr`） | `im +messages-reply`、`im +messages-send` | `im:message`、`im:message.send_as_user` |
 | 在对方消息上点「了解」表情 | `im reactions create` | `im:message.reactions:write_only` |
 | 发附件；起草时下载消息里的图片看 | `im +messages-reply --file`、`im +messages-resources-download`（起草的 Claude 用） | `im:resource` |

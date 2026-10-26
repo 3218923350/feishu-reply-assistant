@@ -1,4 +1,4 @@
-<!-- 复制到 ~/.feishu-reply-assistant/about-me.md 再改（bin/fra setup 会帮你复制）。
+<!-- 复制到 $FRA_HOME/about-me.md（默认 ~/.feishu-reply-assistant/about-me.md）再改（bin/fra setup 会帮你复制）。
      这份文字会原样拼进起草时的系统提示词，写得越具体，草稿越像你。下面是虚构的示例，全部换成你自己的。 -->
 
 ## 我是谁

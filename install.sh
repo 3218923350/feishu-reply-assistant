@@ -6,6 +6,7 @@ FRA_HOME=${FRA_HOME:-$HOME/.feishu-reply-assistant}; export FRA_HOME
 NODE=$(command -v node) || { echo "找不到 node（要 Node 24+）" >&2; exit 1; }
 LABEL=$(FRA_REPO="$DIR" "$NODE" --input-type=module -e "const { loadConfig } = await import(process.env.FRA_REPO + '/lib/config.mjs'); console.log(loadConfig().launchdLabel)") || exit 1  # 路径走环境变量：带引号也不会拼坏
 mkdir -p "$FRA_HOME"
+rm -f "$FRA_HOME/.no-start"  # 之前 setup 没启动（--no-start），现在启动了：doctor 恢复检查常驻服务
 x() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }  # plist 里的路径做 XML 转义
 ENVS="<key>PATH</key><string>$(x "$DIR/bin:$PATH")</string>
     <key>HOME</key><string>$(x "$HOME")</string>
