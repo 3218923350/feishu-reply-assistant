@@ -13,7 +13,7 @@ import { apiError, approvePrompt, chunk, claim, isExternalDenied, isVerified, ma
 import { claims } from './lib/promise.mjs';
 import { dueReminders, fromSend, openCommitments } from './lib/commitments.mjs';
 import { followupChats, matchFollowup, sentIds, workTitle } from './lib/fr.mjs';
-import { closedCard, draftCard, parseClick, reportCard } from './lib/cards.mjs';
+import { clickWatch, closedCard, draftCard, parseClick, reportCard } from './lib/cards.mjs';
 import { finalTier, holds, projectDir, sessionCommands } from './lib/shadow.mjs';
 import { run as runProc } from './lib/run.mjs';
 import { webSend } from './lib/websend.mjs';
@@ -713,6 +713,7 @@ const externalChats = () => new Set([
 
 // ---------- 卡片按钮：机器人应用的长连接收点击回调（一个应用只能有一个进程在收） ----------
 const clicksSeen = new Set();
+const clickLog = clickWatch();
 function listenClicks() {
   const p = spawn(LARK, ['event', 'consume', 'card.action.trigger', '--as', 'bot'], { env: BOT_ENV, cwd: DIR, stdio: ['pipe', 'pipe', 'pipe'] }); // stdin 不关：关了它就退出
   let buf = '';
@@ -720,9 +721,9 @@ function listenClicks() {
     buf += d;
     for (let i; (i = buf.indexOf('\n')) >= 0;) { const line = buf.slice(0, i); buf = buf.slice(i + 1); onClick(line); }
   });
-  p.stderr.on('data', (d) => { const t = String(d); if (/ready|error|exited|"ok": *false/.test(t)) log('clicks', t.trim().replace(/\s+/g, ' ').slice(0, 300)); }); // 压成一行：doctor 按行找 ready
+  p.stderr.on('data', (d) => { const t = clickLog.stderr(d); if (t) log('clicks', t); });
   p.on('error', (e) => log('ERR clicks', e.message));
-  p.on('close', (code) => { log('clicks', `监听退出 code=${code}，30 秒后重连`); setTimeout(listenClicks, 30_000); });
+  p.on('close', (code) => { const { delay, line } = clickLog.exit(code); if (line) log('clicks', line); setTimeout(listenClicks, delay); });
 }
 
 // 点「发送」：发卡上输入框里的（我可能改过）；「不发」：跳过；「按我说的办」：吩咐交给起草会话，没写吩咐就是照卡上办

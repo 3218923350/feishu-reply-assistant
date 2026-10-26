@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { draftCard, reportCard, closedCard, parseClick } from '../lib/cards.mjs';
+import { draftCard, reportCard, closedCard, parseClick, clickWatch } from '../lib/cards.mjs';
 
 const o = { message_id: 'om_o', sender_name: '钱二', chat_name: null, create_time: '2026-10-23 16:53', content: '张三，我想整个 kimi k3 model plan, 我要怎么申请呀', link: 'https://applink.feishu.cn/x' };
 const json = (c) => JSON.stringify(c);
@@ -174,4 +174,25 @@ test('报告卡：后台办事时折叠里给出日志路径', () => {
   const c = JSON.stringify(reportCard(o, { did: '查了', state: 'done' }, [], 's1', { log: '/r/w.log' }));
   assert.ok(c.includes('📄 过程日志：/r/w.log'));
   assert.ok(!JSON.stringify(reportCard(o, { did: '查了', state: 'done' }, [], 's1')).includes('过程日志'));
+});
+
+test('clickWatch：没订阅回调一直断 → 同样的报错只记一次、重连间隔翻倍到 10 分钟封顶；连上后复位', () => {
+  const w = clickWatch();
+  const err = (id) => `[event] error: event card.action.trigger not subscribed (log_id ${id})\n`;
+  assert.equal(w.stderr('[event] listening for events'), null);
+  assert.match(w.stderr(err(111)), /not subscribed/);
+  assert.deepEqual(w.exit(1), { delay: 30_000, line: '监听退出 code=1，30 秒后重连' });
+  const delays = [];
+  for (let i = 0; i < 6; i++) {
+    assert.equal(w.stderr(err(200 + i)), null, '只是数字不同也算同样的报错');
+    const e = w.exit(1);
+    assert.equal(e.line, null);
+    delays.push(e.delay / 1000);
+  }
+  assert.deepEqual(delays, [60, 120, 240, 480, 600, 600]);
+  assert.match(w.stderr('[event] error: app not found'), /app not found/, '换了报错要记');
+  assert.match(w.exit(1).line, /600 秒后重连/);
+  assert.match(w.stderr('[event] ready event_key=card.action.trigger'), /ready/);
+  assert.deepEqual(w.exit(0), { delay: 30_000, line: '监听退出 code=0，30 秒后重连' });
+  assert.match(w.stderr(err(1)), /not subscribed/, '复位后同样的报错又会记一次');
 });

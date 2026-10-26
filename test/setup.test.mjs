@@ -65,6 +65,23 @@ test('runChecks：服务启动后还没连上卡片回调 → ❌', async () => 
   assert.equal(byName(r, '卡片回调').ok, false);
 });
 
+test('runChecks：卡片回调没连上 → detail 带出日志里最后一条报错原文（不是「监听退出」那行）', async () => {
+  const log = 'x start\nx clicks [event] error: card.action.trigger not subscribed\nx clicks 监听退出 code=1，30 秒后重连\n';
+  const c = byName(await runChecks(okFixture({ log }).opts), '卡片回调');
+  assert.equal(c.ok, false);
+  assert.equal(c.detail, '日志里最后一条：[event] error: card.action.trigger not subscribed');
+  const old = byName(await runChecks(okFixture({ log: 'x start\nx clicks [event] already running\n' }).opts), '卡片回调');
+  assert.equal(old.ok, false, 'already 不算 ready');
+});
+
+test('runChecks：全局 CLAUDE.md 打勾时 detail 是文件路径，不是「跑 bin/fra setup」那句提示', async () => {
+  const f = okFixture();
+  const c = byName(await runChecks(f.opts), '全局 CLAUDE.md');
+  assert.equal(c.ok, true);
+  assert.equal(c.detail, path.join(f.home, '.claude', 'CLAUDE.md'));
+  assert.match(c.fix, /bin\/fra setup/);
+});
+
 test('runChecks：没写关于我 → ❌，fix 指向 templates/about-me.md', async () => {
   const c = byName(await runChecks(okFixture({ aboutMe: '' }).opts), '关于我');
   assert.equal(c.ok, false);
