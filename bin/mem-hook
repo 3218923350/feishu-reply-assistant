@@ -1,0 +1,20 @@
+#!/usr/bin/env -S node --no-warnings
+// Claude Code UserPromptSubmit hook 入口：stdin 是 hook JSON，有线索就输出 additionalContext，否则不输出
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { DEFAULT_ROOTS, openIndex, refresh } from '../lib/memory/index.mjs';
+import { promptHook } from '../lib/memory/hook.mjs';
+import { loadConfig } from '../lib/config.mjs';
+
+// 任何问题（没配好、记忆目录不在、stdin 不是 JSON）都静默退出：hook 不能把 Claude Code 弄坏
+try {
+  const cfg = loadConfig();
+  const { prompt } = JSON.parse(fs.readFileSync(0, 'utf8') || '{}');
+  const db = openIndex(path.join(cfg.memoryDir, '.mem-index.sqlite'));
+  refresh(db, DEFAULT_ROOTS(os.homedir(), cfg.memoryDir));
+  const out = promptHook(db, prompt, { ignore: [cfg.name], aliases: cfg.aliases });
+  if (out) process.stdout.write(JSON.stringify(out));
+} catch {
+  process.exit(0);
+}

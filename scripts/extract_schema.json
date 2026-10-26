@@ -1,0 +1,12 @@
+{"type":"object","properties":{"memories":{"type":"array","items":{"type":"object","properties":{
+"type":{"type":"string","enum":["person","faq","procedure","decision","commitment","fact","style"]},
+"title":{"type":"string"},
+"content":{"type":"string"},
+"people":{"type":"array","items":{"type":"string"}},
+"projects":{"type":"array","items":{"type":"string"}},
+"evidence":{"type":"array","items":{"type":"object","properties":{"chat":{"type":"string"},"msg":{"type":"string"},"time":{"type":"string"}},"required":["chat","msg","time"]}},
+"valid_from":{"type":"string"},
+"volatility":{"type":"string","enum":["stable","changes","one-off"]},
+"confidence":{"type":"string","enum":["high","medium","low"]},
+"why_useful":{"type":"string"}},
+"required":["type","title","content","people","projects","evidence","valid_from","volatility","confidence","why_useful"]}}},"required":["memories"]}

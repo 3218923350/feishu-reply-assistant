@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+
+# 设计讨论和实施计划（内部信息，只留本机）
+docs/superpowers/
+docs/design/

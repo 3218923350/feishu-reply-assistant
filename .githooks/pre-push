@@ -1,0 +1,3 @@
+#!/bin/bash
+# 推送前检查：会发布的文件里不能有个人 / 内部信息（黑名单在 $FRA_HOME/clean-blocklist.txt）
+exec node "$(git rev-parse --show-toplevel)/scripts/check-clean.mjs"

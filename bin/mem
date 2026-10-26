@@ -1,0 +1,130 @@
+#!/usr/bin/env -S node --no-warnings
+// mem：记忆库命令行。回复助手、Claude Code、Codex 共用；记忆目录来自配置（config.json 的 memory_dir）
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { DEFAULT_ROOTS, openIndex, refresh, search, who } from '../lib/memory/index.mjs';
+import { acceptEntry, addItems, listPending, rejectEntry } from '../lib/memory/add.mjs';
+import { withLock } from '../lib/memory/lock.mjs';
+import { ConfigError, loadConfig } from '../lib/config.mjs';
+
+const HOME = os.homedir();
+let cfg;
+try { cfg = loadConfig(); } catch (e) { if (!(e instanceof ConfigError)) throw e; console.error(e.message); process.exit(2); }
+const MEM_DIR = cfg.memoryDir;
+const DB = path.join(MEM_DIR, '.mem-index.sqlite'); // 和早期版本的 .index.sqlite 分开，切换期间两边不会互相打架
+const Q = { ignore: [cfg.name], aliases: cfg.aliases }; // 查询里去掉我自己的名字、补上同义词
+
+function parseArgs(argv) {
+  const opts = {}, pos = [];
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--json') opts.json = true;
+    else if (argv[i].startsWith('--')) opts[argv[i].slice(2)] = argv[++i];
+    else pos.push(argv[i]);
+  }
+  return { opts, pos };
+}
+
+function index() {
+  if (!fs.existsSync(MEM_DIR)) { console.error(`记忆目录 ${MEM_DIR} 不存在：先跑 bin/fra setup，或改 config.json 的 memory_dir`); process.exit(2); }
+  let db;
+  try { db = openIndex(DB); } catch (e) { console.error(`记忆目录 ${MEM_DIR} 用不了（${e.message}）`); process.exit(2); }
+  refresh(db, DEFAULT_ROOTS(HOME, MEM_DIR));
+  return db;
+}
+
+// 记忆目录是 git 仓库就提交一次（方便回看和撤销）；不是就算了，条目已经写进去了
+function commit(message) {
+  const git = (...a) => spawnSync('git', ['-C', MEM_DIR, ...a], { encoding: 'utf8' });
+  if (git('rev-parse', '--git-dir').status !== 0) return;
+  const dirs = MEMORY_DIRS.filter((d) => fs.existsSync(path.join(MEM_DIR, d)));
+  if (!dirs.length) return;
+  const add = git('add', '-A', '--', ...dirs);
+  const c = add.status === 0 ? git('commit', '-q', '-m', message) : add;
+  if (c.status !== 0 && !/nothing to commit|nothing added/.test(c.stdout + c.stderr)) {
+    console.error(`git 提交失败：${(c.stderr || c.stdout).trim().slice(0, 300)}`);
+    process.exitCode = 1;
+  }
+}
+const MEMORY_DIRS = ['people', 'policy', 'recipes', 'facts', 'open', 'style', 'inbox'];
+
+// mem add 的输入：JSON 数组、{memories:[...]} 或 JSONL
+function parseItems(text) {
+  const t = text.trim();
+  if (!t) return [];
+  if (t.startsWith('[')) return JSON.parse(t);
+  if (t.startsWith('{') && !t.includes('\n{')) { const o = JSON.parse(t); return o.memories || o.structured_output?.memories || [o]; }
+  return t.split('\n').filter(Boolean).map((l) => JSON.parse(l));
+}
+
+const resolvePath = (p) => path.resolve(p.replace(/^~(?=\/)/, HOME));
+const tilde = (p) => (p.startsWith(HOME) ? '~' + p.slice(HOME.length) : p);
+function print(hits) {
+  for (const h of hits) {
+    console.log(`${tilde(h.path)}  [${h.type}${h.review === 'pending' ? '|待确认' : ''}${h.status !== 'active' ? '|' + h.status : ''}] ${h.title} (${h.updated})`);
+    console.log(`    ${h.snippet}`);
+  }
+  if (!hits.length) console.log('（没有命中）');
+}
+
+const [cmd, ...rest] = process.argv.slice(2);
+const { opts, pos } = parseArgs(rest);
+const out = (v) => (opts.json ? console.log(JSON.stringify(v, null, 1)) : null);
+
+switch (cmd) {
+  case 'search': {
+    const hits = search(index(), pos.join(' '), { type: opts.type, limit: Number(opts.limit || 8), scope: opts.scope || 'all', ...Q });
+    opts.json ? out(hits) : print(hits);
+    break;
+  }
+  case 'who': {
+    const { person, related } = who(index(), pos.join(' '), { id: opts.id, ...Q });
+    if (opts.json) out({ person, related });
+    else { console.log('## 人物'); print(person); console.log('## 相关口径 / 事项'); print(related); }
+    break;
+  }
+  case 'add': {
+    const src = pos[0] && pos[0] !== '-' ? fs.readFileSync(pos[0], 'utf8') : fs.readFileSync(0, 'utf8');
+    const results = await withLock(MEM_DIR, () => {
+      const r = addItems(MEM_DIR, parseItems(src));
+      commit(opts.message || `mem add: ${r.length} 条`);
+      return r;
+    });
+    const n = (a) => results.filter((r) => r.action === a).length;
+    if (opts.json) out(results);
+    else {
+      console.log(`新建 ${n('created')}，追加 ${n('appended')}，待确认 ${n('inbox')}，冲突 ${n('conflict')}，跳过 ${n('skipped')}`);
+      for (const r of results.filter((r) => r.path)) console.log(`  ${r.action}  ${tilde(r.path)}`);
+    }
+    break;
+  }
+  case 'review': {
+    const items = listPending(MEM_DIR).map((e) => ({ path: e.path, type: e.meta.type, title: e.meta.title, updated: e.meta.updated }));
+    if (opts.json) out(items);
+    else { for (const e of items) console.log(`${tilde(e.path)}  [${e.type}] ${e.title}`); console.log(`待确认 ${items.length} 条`); }
+    break;
+  }
+  case 'accept': case 'reject':
+    await withLock(MEM_DIR, () => {
+      for (const p of pos.map(resolvePath)) {
+        if (cmd === 'accept') console.log(`已确认 → ${tilde(acceptEntry(MEM_DIR, p))}`);
+        else { rejectEntry(MEM_DIR, p); console.log(`已删除 ${tilde(p)}`); }
+      }
+      commit(`mem ${cmd}: ${pos.length} 条`);
+    });
+    break;
+  case 'reindex':
+    fs.rmSync(DB, { force: true });
+    console.log(`已重建索引：${refresh(openIndex(DB), DEFAULT_ROOTS(HOME, MEM_DIR)).changed} 个文件`);
+    break;
+  default:
+    console.log(`用法：
+  mem search <关键词> [--type t] [--limit n] [--scope mine|all] [--json]
+  mem who <姓名|open_id> [--id ou_xxx] [--json]
+  mem add [文件|-] [--message 说明] [--json]
+  mem review [--json] | mem accept <路径> | mem reject <路径>
+  mem reindex
+记忆目录 ${MEM_DIR}；格式见仓库的 docs/MEMORY.md`);
+    if (cmd && cmd !== 'help') process.exitCode = 1;
+}

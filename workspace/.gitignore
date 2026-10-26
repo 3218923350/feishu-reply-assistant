@@ -1,0 +1,4 @@
+# 起草时下载的截图、账单、附件：不进 git（daily.sh 每天清理 7 天前的）
+*
+!.gitignore
+!CLAUDE.md

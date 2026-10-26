@@ -1,0 +1,156 @@
+#!/usr/bin/env -S node --no-warnings
+// fr：办事阶段 Claude 以我的身份发消息 / 挂跟进的唯一入口。授权上下文由助手程序写进 FR_CTX（防误发的护栏，不防有意伪造，见 docs/DESIGN.md「安全边界」）
+//   fr send --to <orig|人名|ou_xxx|oc_xxx> --text <正文> --why <我原话里授权这次发送的片段> [--file 路径 ...]
+//        正文 / 附件里有 key 或密码的：只有我原话里明确让发，才能加 --secret-ok <那句原话片段> 发出
+//   fr wait --for <人名|ou_xxx> --then <他回了之后做什么> [--why <我原话里要求跟进的片段>] [--until 2d]
+//   fr done
+// 退出码：0 成功（或已发过；外部会话自动改用 Orca 里的网页版飞书）  1 发送出错  2 不在授权范围 / 参数不对  3 外部会话网页版也没发成（已放剪贴板）  4 结果未知（别重发）
+import { spawnSync } from 'node:child_process';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { whyOk, inScope, dedupKey, tooShortToCompose } from '../lib/fr.mjs';
+import { webSend } from '../lib/websend.mjs';
+import { redact } from '../lib/memory/secrets.mjs';
+import { BIN, ConfigError, loadConfig } from '../lib/config.mjs';
+import { launcherFor, orcaBin } from '../lib/orca.mjs';
+import { run } from '../lib/run.mjs';
+
+const die = (code, msg) => { process.stderr.write(msg + '\n'); process.exit(code); };
+let cfg;
+try { cfg = loadConfig(); } catch (e) { if (!(e instanceof ConfigError)) throw e; die(2, e.message); }
+const NAME = cfg.name;
+const DIR = cfg.home;
+const LARK = process.env.FR_LARK || BIN().lark;
+const hasSecret = (x) => redact(x, { prefixes: cfg.secretPrefixes }).hits;
+const PBCOPY = process.env.FR_PBCOPY || '/usr/bin/pbcopy';
+const ORCA = process.env.FR_ORCA || orcaBin();
+const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'); // 不用 URL.pathname：路径带空格会变成 %20
+const SECRET_WORD = /key|密钥|秘钥|\bak\b|\bsk\b|token|密码|口令|凭据|凭证|账号/i;
+// 附件按文本扫一遍（二进制 / 太大的扫不了，跳过）
+const fileText = (f) => { try { const b = fs.readFileSync(f); return b.length < 5e6 && !b.includes(0) ? b.toString('utf8') : ''; } catch { return ''; } };
+
+if (!process.env.FR_CTX) die(2, 'fr 只能在助手开的办事会话里用（没有 FR_CTX）');
+const ctx = JSON.parse(fs.readFileSync(process.env.FR_CTX, 'utf8'));
+const [cmd, ...rest] = process.argv.slice(2);
+const opts = { file: [] };
+for (let i = 0; i < rest.length; i++) {
+  const k = rest[i].replace(/^--/, '');
+  if (k === 'file') opts.file.push(rest[++i]); else opts[k] = rest[++i];
+}
+
+function lark(args, cwd) {
+  const r = spawnSync(LARK, args, { cwd, encoding: 'utf8', timeout: 60_000 });
+  if (r.error?.code === 'ETIMEDOUT' || r.signal) return { timeout: true };
+  const txt = (r.stdout || '').trim() || (r.stderr || '').trim();
+  let j; try { j = JSON.parse(txt.slice(txt.indexOf('{'))); } catch { j = { ok: false, error: { message: txt.slice(0, 300) } }; }
+  return j;
+}
+
+// 收件人 → { kind, id, name }
+function resolve(to) {
+  if (!to) die(2, '缺 --to');
+  if (to === 'orig') return { kind: 'orig', id: ctx.orig.message_id, name: ctx.orig.sender_name };
+  if (to.startsWith('ou_')) {
+    const u = lark(['contact', '+get-user', '--as', 'user', '--user-id', to]).data?.user;
+    return { kind: 'user', id: to, name: u?.name || to };
+  }
+  if (to.startsWith('oc_')) {
+    const c = (lark(['im', '+chat-search', '--as', 'user', '--query', to]).data?.chats || []).find((x) => x.chat_id === to);
+    return { kind: 'chat', id: to, name: c?.name || (to === ctx.orig.chat_id ? ctx.orig.chat_name : to) };
+  }
+  const users = (lark(['contact', '+search-user', '--as', 'user', '--query', to]).data?.users || []).filter((u) => (u.localized_name || u.name) === to);
+  const chats = users.length ? [] : (lark(['im', '+chat-search', '--as', 'user', '--query', to]).data?.chats || []).filter((c) => c.name === to);
+  const hits = [...users.map((u) => ({ kind: 'user', id: u.open_id, name: to })), ...chats.map((c) => ({ kind: 'chat', id: c.chat_id, name: to }))];
+  if (hits.length !== 1) die(2, `「${to}」找到 ${hits.length} 个，没法确定是谁，先问${NAME}（或用 ou_/oc_ id）`);
+  return hits[0];
+}
+
+function event(e) {
+  fs.mkdirSync(path.join(DIR, 'events'), { recursive: true });
+  fs.appendFileSync(path.join(DIR, 'events', `${new Date().toISOString().slice(0, 7)}.jsonl`),
+    JSON.stringify({ ts: new Date().toISOString(), card: ctx.card, ...e }) + '\n');
+}
+const sentBefore = (key) => fs.existsSync(path.join(DIR, 'events')) && fs.readdirSync(path.join(DIR, 'events')).some((f) =>
+  fs.readFileSync(path.join(DIR, 'events', f), 'utf8').split('\n').some((l) => l.includes(`"key":"${key}"`) && /"kind":"fr-(sent|unknown)"/.test(l)));
+
+// 这件事里最近一次发给这个人的消息在哪个会话
+const sentChat = (to) => {
+  const dir = path.join(DIR, 'events');
+  if (!fs.existsSync(dir)) return null;
+  const hits = fs.readdirSync(dir).sort().flatMap((f) => fs.readFileSync(path.join(dir, f), 'utf8').split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return {}; } }))
+    .filter((e) => e.kind === 'fr-sent' && e.to === to && e.chat_id);
+  return hits.at(-1)?.chat_id || null;
+};
+
+function sendArgs(t, extra) {
+  if (t.kind === 'orig') return ['im', '+messages-reply', '--as', 'user', '--message-id', t.id, ...(ctx.orig.thread_id ? ['--reply-in-thread'] : []), ...extra];
+  return ['im', '+messages-send', '--as', 'user', t.kind === 'user' ? '--user-id' : '--chat-id', t.id, ...extra];
+}
+
+if (cmd === 'send') {
+  const text = String(opts.text || '').trim();
+  if (!text) die(2, '缺 --text');
+  if (!whyOk(ctx.authText, opts.why)) die(2, `--why 必须是${NAME}原话里的片段（他的原话：「${ctx.authText}」）。他没说要发，就先问他`);
+  if (tooShortToCompose(ctx, text)) die(2, `${NAME}这句「${ctx.authText}」太短，不足以授权发一段新写的话：把要发的写进报告的 draft，等他说「发」`);
+  const t = resolve(opts.to);
+  if (!inScope(ctx, t)) die(2, `「${t.name}」不在这次的授权范围（只能发给原会话/原发送人，或${NAME}这句话里点了名的人）：先问${NAME}`);
+  // key 可以用，但不能给别人：要发得是我原话里明确允许的
+  if ([text, ...opts.file.map(fileText)].some(hasSecret)) {
+    const ok = opts['secret-ok'];
+    if (!ok) die(2, `正文或附件里疑似有 key 或密码，${NAME}没明确允许就不能发给别人。他这句话里明确让发了，就加 --secret-ok "<那句原话片段>"；没有就把内容写进报告 draft，让他看了再「发」`);
+    if (!whyOk(ctx.authText, ok) || !SECRET_WORD.test(ok)) die(2, `--secret-ok 必须是${NAME}原话里明确让发 key / 密码的片段（他的原话：「${ctx.authText}」），没有就先问他`);
+  }
+  const key = dedupKey(ctx.card, t.id, text);
+  if (sentBefore(key)) { console.log(`已经发过（或结果未知），不再重复：${t.name}`); process.exit(0); }
+  const r = lark(sendArgs(t, ['--text', text]));
+  const base = { key, to: t.id, toName: t.name, text: redact(text, { prefixes: cfg.secretPrefixes }).text, why: opts.why }; // 记录和报告卡上不留明文
+  if (r.timeout) { event({ kind: 'fr-unknown', ...base }); die(4, `发给 ${t.name} 超时，结果未知，不要重发，去会话里核对`); }
+  if (!r.ok && /230027/.test(JSON.stringify(r.error || ''))) {
+    // 外部会话：改用 Orca 里的网页版飞书发（话题里的回不进话题，只能手动）
+    const o = ctx.orig;
+    const chat = t.kind === 'orig' && !o.thread_id ? { name: o.chat_type === 'p2p' ? o.sender_name : o.chat_name, group: o.chat_type !== 'p2p', chatId: o.chat_id }
+      : t.kind === 'chat' && t.name !== t.id ? { name: t.name, group: true, chatId: t.id } : null;
+    const web = !chat?.name ? { ok: false, why: o.thread_id ? '原消息在话题里，网页版回不进话题' : '网页版只能发原会话或指定的群' }
+      : !cfg.messengerUrl ? { ok: false, why: '没配置 messenger_url' }
+      : !(await launcherFor(run, ORCA)) ? { ok: false, why: '没开 Orca' }
+      : await webSend({ ...chat, text, orca: ORCA, lark: LARK, repo: REPO, dir: DIR, me: cfg.openId, messenger: cfg.messengerUrl, pollMs: Number(process.env.FR_WEB_POLL_MS || 3000) });
+    if (web.ok) {
+      event({ kind: 'fr-sent', ...base, via: 'web', message_id: web.message_id });
+      for (const f of opts.file) event({ kind: 'fr-manual', key: dedupKey(ctx.card, t.id, f), to: t.id, toName: t.name, text: `📎 ${path.basename(f)}（网页版还不会发附件）` });
+      console.log(`已发给 ${t.name}（外部会话，用网页版飞书发的，${web.message_id}）${opts.file.length ? `；附件没发，要${NAME}手动发` : ''}`);
+      process.exit(0);
+    }
+    if (web.unknown) { event({ kind: 'fr-unknown', ...base, via: 'web' }); die(4, `${web.why}：不要重发，报告里写明让${NAME}去会话里看一眼`); }
+    spawnSync(PBCOPY, { input: text });
+    event({ kind: 'fr-manual', ...base, why_manual: web.why });
+    die(3, `${t.name} 是外部会话，飞书不允许以${NAME}身份发（230027），网页版也没发成（${web.why}），已放剪贴板，报告里写明「没发出」`);
+  }
+  if (!r.ok) die(1, `发送失败：${JSON.stringify(r.error).slice(0, 300)}`);
+  event({ kind: 'fr-sent', ...base, message_id: r.data?.message_id, chat_id: r.data?.chat_id });
+  for (const f of opts.file) {
+    const fr2 = lark(sendArgs(t, ['--file', path.basename(f)]), path.dirname(path.resolve(f)));
+    if (fr2.ok) event({ kind: 'fr-sent', key: dedupKey(ctx.card, t.id, f), to: t.id, toName: t.name, text: `📎 ${path.basename(f)}`, message_id: fr2.data?.message_id });
+    else process.stderr.write(`文件没发出去：${f} ${JSON.stringify(fr2.error || '').slice(0, 200)}\n`);
+  }
+  console.log(`已发给 ${t.name}（${r.data?.message_id}）`);
+} else if (cmd === 'wait') {
+  const t = resolve(opts.for);
+  if (t.kind !== 'user') die(2, '--for 要是一个人');
+  if (!inScope(ctx, t)) die(2, `「${t.name}」不在这次的授权范围，先问${NAME}`);
+  if (!opts.then) die(2, '缺 --then（他回了之后做什么）');
+  // 授权看来源：--why 引用了我原话里要求跟进的那句才算我要求的（被叫醒后可以在原话范围内办和发）；没引用 = 你自己挂的，被叫醒后只能查、只能出卡
+  if (opts.why && !whyOk(ctx.authText, opts.why)) die(2, `--why 必须是${NAME}原话里的片段（他的原话：「${ctx.authText}」）；他没要求跟进就别带 --why`);
+  const auth = opts.why ? 'said' : 'none';
+  // 只认在哪个会话的回复：原发送人 → 原会话；第三人 → 这件事里发给他的那个会话（没发过就只认私聊）
+  const chat_id = t.id === ctx.orig.sender_id ? ctx.orig.chat_id : sentChat(t.id);
+  const days = Number(String(opts.until || '3d').replace(/d$/, '')) || 3;
+  fs.appendFileSync(path.join(DIR, 'followups.jsonl'), JSON.stringify({ op: 'add', id: crypto.randomUUID(), at: Date.now(), card: ctx.card,
+    session: ctx.session, cwd: ctx.cwd, orig: ctx.orig, authText: ctx.authText, auth, why: opts.why || '', watch: { open_id: t.id, name: t.name, chat_id },
+    then: opts.then, until: Date.now() + days * 86400_000 }) + '\n');
+  console.log(`记下了：等 ${t.name} 回复（最多 ${days} 天），回了就接着做`);
+} else if (cmd === 'done') {
+  fs.appendFileSync(path.join(DIR, 'followups.jsonl'), JSON.stringify({ op: 'done', at: Date.now(), card: ctx.card }) + '\n');
+  console.log('这件事的跟进已结束');
+} else die(2, '用法：fr send|wait|done（见 bin/fr 开头注释）');

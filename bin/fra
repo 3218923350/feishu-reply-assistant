@@ -1,0 +1,186 @@
+#!/usr/bin/env -S node --no-warnings
+// fra：安装和检查。fra setup [--no-start] 一路引导装好；fra doctor 逐项检查；fra doctor --report 生成给 Issue 用的脱敏报告
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { createInterface } from 'node:readline/promises';
+import { fileURLToPath } from 'node:url';
+import { BIN, botEnv, expandBotEnv, fraHome, loadConfig } from '../lib/config.mjs';
+import { run } from '../lib/run.mjs';
+import { runChecks } from '../lib/setup/checks.mjs';
+import { MEM_SNIPPET, addSnippet, hookCommand, mergeHook } from '../lib/setup/claude.mjs';
+import { initMemoryDir } from '../lib/setup/memdir.mjs';
+import { draftGroupStep, isOpenId, ownerIdStep } from '../lib/setup/steps.mjs';
+import { anonymize, reportNames } from '../lib/setup/report.mjs';
+
+const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const [cmd, ...rest] = process.argv.slice(2);
+const MARK = { true: '✅', false: '❌', null: '⏭' };
+const show = (checks) => checks.map((c) => `${MARK[c.ok]} ${c.name}${c.detail ? ` — ${c.detail}` : ''}${c.ok === false && c.fix ? `\n    → ${c.fix}` : ''}`).join('\n');
+
+async function doctor({ report = false } = {}) {
+  const checks = await runChecks({ load: () => loadConfig(), run, repo: REPO });
+  console.log(show(checks));
+  if (report) {
+    let cfg = null; try { cfg = loadConfig(); } catch {}
+    const home = cfg?.home || fraHome();
+    const tail = (f) => { try { return fs.readFileSync(path.join(home, f), 'utf8').split('\n').slice(-200).join('\n'); } catch { return '（没有）'; } };
+    const ver = async (c, a) => ((await run(c, a)).out || '').trim().split('\n')[0];
+    const raw = [
+      `# feishu-reply-assistant doctor report ${new Date().toISOString()}`,
+      `版本：${await ver('git', ['-C', REPO, 'rev-parse', '--short', 'HEAD'])}；node ${process.version}；claude ${await ver('claude', ['--version'])}；lark-cli ${await ver('lark-cli', ['--version'])}`,
+      '', '## doctor', show(checks),
+      '', '## config.json', (() => { try { return fs.readFileSync(path.join(home, 'config.json'), 'utf8'); } catch { return '（没有）'; } })(),
+      '', '## assistant.log（最后 200 行）', tail('assistant.log'),
+      '', '## daily.log（最后 200 行）', tail('daily.log'),
+    ].join('\n');
+    const now = new Date(), p2 = (n) => String(n).padStart(2, '0'); // 本地时间，和日志对得上
+    const file = path.join(home, `doctor-report-${now.getFullYear()}${p2(now.getMonth() + 1)}${p2(now.getDate())}-${p2(now.getHours())}${p2(now.getMinutes())}.txt`);
+    fs.mkdirSync(home, { recursive: true });
+    const { names, prefixes } = reportNames(home, cfg);
+    fs.writeFileSync(file, anonymize(raw, { names, prefixes, home: os.homedir() }));
+    console.log(`\n报告写在 ${file}\n人名、群名、消息正文、id、本机路径、网址主机都换成了占位符，key 已脱敏。${cfg ? '' : '配置没读到，名字可能没收全，'}贴到 Issue 之前请自己先看一遍。`);
+  }
+  if (checks.some((c) => c.ok === false)) process.exitCode = 1;
+}
+
+// ---------- setup：每一步先看做没做过，做过就跳过；可以反复跑 ----------
+const USER_LOGIN = ['auth', 'login', '--domain', 'im,contact', '--scope', 'search:message']; // 权限清单见 docs/feishu-app.md
+const stamp = () => new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '');
+const done = (step) => console.log(`✓ ${step}（已完成）`);
+const json = (r) => { try { return JSON.parse(r.out.slice(r.out.indexOf('{'))); } catch { return {}; } };
+
+async function setup({ noStart = false } = {}) {
+  // 每一步都要人点头（改 ~/.claude、建飞书群、装 launchd）：不在交互终端里（被脚本或 agent 调起）就不跑，免得默认答案替人同意
+  if (!process.stdin.isTTY || !process.stdout.isTTY) { console.error('bin/fra setup 要在终端里交互着跑（它会改 ~/.claude、建草稿群、装 launchd，每一步都要你确认）'); process.exitCode = 1; return; }
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const ask = async (q, def = '') => ((await rl.question(`${q}${def ? `（默认 ${def}）` : ''}：`)).trim() || def);
+  const yes = async (q, def = true) => { const a = (await rl.question(`${q} [${def ? 'Y/n' : 'y/N'}] `)).trim().toLowerCase(); return a ? a.startsWith('y') : def; };
+  const interactive = (cmd, args, env = process.env) => spawnSync(cmd, args, { stdio: 'inherit', env }).status === 0;
+  const { lark } = BIN();
+  const home = fraHome();
+  const cfgFile = path.join(home, 'config.json');
+  fs.mkdirSync(home, { recursive: true });
+  const existing = (() => { try { return JSON.parse(fs.readFileSync(cfgFile, 'utf8')); } catch { return {}; } })();
+  const next = { ...existing };
+  try {
+    // 1. 基础依赖
+    const pre = await runChecks({ load: () => loadConfig(), run, repo: REPO, limit: 4 });
+    if (pre.some((c) => c.ok === false)) { console.log(show(pre)); process.exitCode = 1; return; }
+    done('macOS / Node / Claude Code / lark-cli');
+
+    // 2. 飞书应用 + 3. 用户身份登录
+    let user = json(await run(lark, ['auth', 'status'])).identities?.user;
+    if (user?.status === 'ready' && await yes(`lark-cli 已经以「${user.userName}」登录（应用 ${json(await run(lark, ['auth', 'status'])).appId || '?'}），就用这个应用？`)) done('飞书应用');
+    else {
+      console.log(`\n先在飞书开放平台建一个企业自建应用（步骤和要开的权限见 ${path.join(REPO, 'docs/feishu-app.md')}），再让 lark-cli 绑定它：`);
+      if (!interactive(lark, ['config', 'init'])) throw new Error('lark-cli config init 没完成');
+      user = null; // 换了应用，之前的登录不算数
+    }
+    if (user?.status !== 'ready' || !(await yes('用户身份的权限够用（docs/feishu-app.md 里那张表）？不确定就选 n 重新授权一次', true))) {
+      if (!interactive(lark, USER_LOGIN)) throw new Error('lark-cli auth login 没完成');
+    }
+    user = json(await run(lark, ['auth', 'status'])).identities?.user;
+    if (user?.status !== 'ready') throw new Error('lark-cli 用户身份还没登录好');
+    const owner = ownerIdStep(existing.open_id, user.openId);
+    if (owner.conflict && await yes(`config.json 里的 open_id 是 ${existing.open_id}，lark-cli 现在登录的是 ${user.userName} ${user.openId}。改成现在登录的这个？`, false)) owner.id = user.openId;
+    Object.assign(next, { name: next.name || user.userName, open_id: owner.id });
+    done(`用户身份：${user.userName} ${owner.id}`);
+
+    // 4. 机器人
+    const askBotId = async () => { for (;;) { const id = await ask('你在机器人应用下的 open_id（ou_ 开头；怎么查见 docs/feishu-app.md「两个应用」）'); if (isOpenId(id)) return id; console.log('要填 ou_ 开头的 open_id'); } };
+    if (existing.bot_env && Object.keys(existing.bot_env).length) {
+      if (!isOpenId(existing.bot_open_id)) next.bot_open_id = await askBotId(); // 两个应用必须有机器人应用下的 id，否则按钮全点不动
+      done('机器人（另一个应用，沿用 config.json 里的 bot_env）');
+    }
+    else if (await yes('机器人（草稿群发卡片、收按钮回调）用同一个应用？', true)) { next.bot_env = {}; next.bot_open_id = null; done('机器人：同一个应用'); }
+    else {
+      next.bot_env = { LARKSUITE_CLI_CONFIG_DIR: await ask('机器人应用的 lark-cli 配置目录', path.join(os.homedir(), '.lark-bot')) };
+      next.bot_open_id = await askBotId();
+    }
+    const bot = () => botEnv({ botEnv: expandBotEnv(next.bot_env) }); // 和 loadConfig 一样展开 ~
+    if (json(await run(lark, ['auth', 'status'], { env: bot() })).identities?.bot?.available !== true) {
+      console.log('⚠️ 机器人身份不可用：在开放平台给应用开「机器人」能力并发布版本（公司租户一般要管理员审核），然后重跑 bin/fra setup');
+    }
+
+    // 5. 草稿群
+    const me = next.bot_open_id || next.open_id;
+    const list = existing.draft_chat_id ? json(await run(lark, ['im', '+chat-members-list', '--as', 'bot', '--chat-id', existing.draft_chat_id], { env: bot() })) : null;
+    const step = draftGroupStep({ id: existing.draft_chat_id, list, me });
+    if (step === 'error') throw new Error(`查草稿群 ${existing.draft_chat_id} 失败（${JSON.stringify(list?.error || list).slice(0, 160)}）：稍后重跑；不会另建一个群`);
+    if (step === 'keep' || (step === 'ask' && !(await yes(`你不在草稿群 ${existing.draft_chat_id} 里（或机器人看不到你）。另建一个新的草稿群？`, false)))) done(`草稿群 ${existing.draft_chat_id}`);
+    else {
+      const r = json(await run(lark, ['im', '+chat-create', '--as', 'bot', '--name', '飞书回复草稿箱', '--users', me, '--owner', me], { env: bot() }));
+      const id = r.data?.chat_id;
+      if (!id) throw new Error(`建草稿群失败：${JSON.stringify(r.error || r).slice(0, 200)}（机器人能力开了吗？）`);
+      next.draft_chat_id = id;
+      fs.writeFileSync(cfgFile, JSON.stringify(next, null, 2) + '\n'); // 马上落盘：后面中断了重跑也不会再建一个群
+      console.log(`✓ 建好草稿群「飞书回复草稿箱」${id}，你和机器人都在里面`);
+    }
+
+    // 6. 配置 + 关于我
+    if (next.secret_prefixes == null) {
+      const p = await ask('你们公司的 key 有固定前缀吗（比如 abc_xxxx 就写 abc，多个用逗号隔开；没有直接回车）');
+      next.secret_prefixes = p ? p.split(/[,，\s]+/).filter(Boolean) : [];
+    }
+    fs.writeFileSync(cfgFile, JSON.stringify(next, null, 2) + '\n');
+    console.log(`✓ 写好 ${cfgFile}`);
+    const about = path.join(home, 'about-me.md');
+    if (fs.existsSync(about)) done('about-me.md');
+    else { fs.copyFileSync(path.join(REPO, 'templates/about-me.md'), about); console.log(`✓ 复制了 ${about}：先把里面的示例改成你自己的（你是谁、负责什么、常用仓库），草稿像不像你主要看它`); }
+    const cfg = loadConfig();
+
+    // 7. 记忆目录
+    const m = await initMemoryDir(cfg.memoryDir, run);
+    m.created ? console.log(`✓ 记忆目录 ${cfg.memoryDir}`) : done(`记忆目录 ${cfg.memoryDir}`);
+
+    // 8. Claude Code：hook + 全局说明（先备份，先问）
+    for (const [file, change, what] of [
+      [path.join(os.homedir(), '.claude', 'settings.json'), (t) => mergeHook(t, hookCommand(REPO)), '记忆 hook（每次提问自动带上相关记忆）'],
+      [path.join(os.homedir(), '.claude', 'CLAUDE.md'), (t) => addSnippet(t, MEM_SNIPPET), '「先 mem search」那段全局说明'],
+    ]) {
+      const before = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+      const r = change(before);
+      if (!r.changed) { done(`${what}（${file}）`); continue; }
+      if (!(await yes(`在 ${file} 装上${what}？`, true))) continue;
+      const bak = `${file}.bak-${stamp()}`;
+      if (before) fs.copyFileSync(file, bak);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, r.text);
+      console.log(`✓ ${what}${before ? `（原文件备份在 ${bak}）` : ''}`);
+    }
+
+    // 9. mem 命令放进 PATH
+    const local = path.join(os.homedir(), '.local', 'bin');
+    if (String(process.env.PATH).split(':').includes(local)) {
+      fs.mkdirSync(local, { recursive: true });
+      const link = path.join(local, 'mem');
+      const cur = (() => { try { return fs.realpathSync(link); } catch { return null; } })();
+      if (cur === fs.realpathSync(path.join(REPO, 'bin', 'mem'))) done('mem 命令');
+      else if (!cur || await yes(`${link} 现在指向 ${cur}，改成指向这个仓库的 bin/mem？`, true)) { fs.rmSync(link, { force: true }); fs.symlinkSync(path.join(REPO, 'bin', 'mem'), link); console.log(`✓ ${link} → ${REPO}/bin/mem`); }
+    } else console.log(`⚠️ ~/.local/bin 不在 PATH 里：自己把 ${REPO}/bin/mem 链到 PATH 里的某个目录（日常 Claude Code 里要用 mem 命令）`);
+
+    // 10. 常驻服务
+    const mark = path.join(home, '.no-start');
+    if (noStart) { fs.writeFileSync(mark, ''); console.log('⏭ 没启动常驻服务（--no-start）；要启动就跑 ./install.sh'); }
+    else { fs.rmSync(mark, { force: true }); if (!interactive(path.join(REPO, 'install.sh'), [])) throw new Error('install.sh 失败'); }
+
+    // 11. 冷启动
+    if (await yes('现在跑冷启动吗？从最近 30 天的飞书里抽记忆（先拉消息、告诉你有多少批，再问一次；会花 Claude 的钱）', false)) {
+      interactive(path.join(REPO, 'scripts/coldstart.sh'), ['30']);
+    }
+  } catch (e) {
+    console.log(`\n❌ ${e.message}\n修好以后重跑 bin/fra setup，做过的步骤会跳过。`);
+    process.exitCode = 1;
+    return;
+  } finally { rl.close(); }
+
+  // 12. 检查一遍
+  console.log('\n—— bin/fra doctor ——');
+  await doctor();
+}
+
+if (cmd === 'doctor') await doctor({ report: rest.includes('--report') });
+else if (cmd === 'setup') await setup({ noStart: rest.includes('--no-start') });
+else { console.log('用法：bin/fra setup [--no-start] | bin/fra doctor [--report]'); if (cmd && cmd !== 'help') process.exitCode = 1; }

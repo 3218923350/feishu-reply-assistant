@@ -1,0 +1,15 @@
+{"type":"object","properties":{
+"type":{"type":"string","enum":["person","policy","recipe","fact","open","style"]},
+"title":{"type":"string"},
+"entities":{"type":"array","items":{"type":"string"}},
+"scope":{"type":"string"},
+"content":{"type":"string"},
+"sources":{"type":"array","items":{"type":"string"}},
+"observed":{"type":"string"},
+"confidence":{"type":"string","enum":["high","medium","low"]},
+"review":{"type":"string","enum":["auto","pending"]},
+"due":{"type":"string"},
+"status":{"type":"string","enum":["active","superseded","conflict","open","overdue","done"]},
+"target":{"type":"string"},
+"conflict_with":{"type":"string"}},
+"required":["type","title","entities","scope","content","sources","observed","confidence","review"]}
