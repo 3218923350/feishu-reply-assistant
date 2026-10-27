@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { repliedTo, shouldDraft } from '../lib/inbox.mjs';
+import { repliedTo, shouldDraft, watchedThreadReply } from '../lib/inbox.mjs';
 
 const ME = 'ou_me';
 const m = { message_id: 'om_q', chat_type: 'group', create_time: '2026-10-22 21:20', sender: { id: 'ou_u10' }, thread_id: null };
@@ -22,9 +22,25 @@ test('别人的消息、或比这条早的我的消息 → 不算', () => {
   assert.equal(repliedTo(m, [{ ...mine({ reply_to: 'om_q' }), sender: { id: 'ou_x' } }], ME), false);
   assert.equal(repliedTo(m, [mine({ reply_to: 'om_q', create_time: '2026-10-22 21:19' })], ME), false);
 });
-test('私聊里我之后说过话 → 已回复', () => {
+test('私聊主消息流里我之后说过话 → 已回复', () => {
   assert.equal(repliedTo({ ...m, chat_type: 'p2p' }, [mine({})], ME), true);
 });
+test('私聊话题里别把另一个话题的回复算成已回复；同话题或引用才算', () => {
+  const q = { ...m, chat_type: 'p2p', thread_id: 'omt_a' };
+  assert.equal(repliedTo(q, [mine({ thread_id: 'omt_b' })], ME), false);
+  assert.equal(repliedTo(q, [mine({ thread_id: 'omt_a' })], ME), true);
+  assert.equal(repliedTo(q, [mine({ reply_to: 'om_q' })], ME), true);
+});
+test('已知话题自动跟随：只认原收件人的新回复，不认其他人和自己', () => {
+  const t = { thread_id: 'omt_a', root_message_id: 'om_root', watch_sender_id: 'ou_u10' };
+  const reply = { message_id: 'om_new', sender: { id: 'ou_u10', sender_type: 'user' } };
+  assert.equal(watchedThreadReply(reply, t, {}, ME), true);
+  assert.equal(watchedThreadReply({ ...reply, sender: { id: 'ou_other', sender_type: 'user' } }, t, {}, ME), false);
+  assert.equal(watchedThreadReply({ ...reply, sender: { id: ME, sender_type: 'user' } }, t, {}, ME), false);
+  assert.equal(watchedThreadReply({ ...reply, message_id: 'om_root' }, t, {}, ME), false);
+  assert.equal(watchedThreadReply(reply, t, { om_new: 1 }, ME), false);
+});
+
 test('shouldDraft：已有这条消息的草稿 → 不再起草', () => {
   const state = { items: { om_card: { orig: { message_id: 'om_q' } } } };
   assert.equal(shouldDraft(m, state), false);
