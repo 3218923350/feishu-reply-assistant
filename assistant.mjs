@@ -218,7 +218,7 @@ async function gatherContext(m) {
 // ---------- Claude ----------
 async function askClaude(prompt, resume, cwd = WORKSPACE, { final = false } = {}) {
   const args = ['-p', prompt, '--output-format', 'json', '--json-schema', SCHEMA, '--append-system-prompt', PROMPT,
-    ...DRAFT_PERMS, '--max-turns', final ? '3' : '8']; // 收尾也用同一套权限，保住 prompt 缓存
+    ...DRAFT_PERMS, '--max-turns', final ? '3' : String(Number(process.env.FRA_MAX_TURNS) || 12)]; // 收尾也用同一套权限，保住 prompt 缓存
   if (resume) args.push('--resume', resume);
   const r = await run(CLAUDE, args, { cwd, timeout: CLAUDE_TIMEOUT_MS });
   let j;
