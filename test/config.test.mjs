@@ -29,6 +29,7 @@ test('loadConfig：读 FRA_HOME/config.json，展开 ~，补默认值', () => {
   assert.equal(c.launchdLabel, 'com.feishu-reply-assistant');
   assert.equal(c.legacyWorkDir, null);
   assert.equal(c.messengerUrl, null);
+  assert.equal(c.autoReact, true); // 不写就点表情，和以前一样
 });
 
 test('loadConfig：不设 FRA_HOME 用 ~/.feishu-reply-assistant；memory_dir 默认在它下面', () => {
@@ -77,7 +78,8 @@ test('botEnv：bot_env 合进环境变量，~ 已展开', () => {
 
 test('loadConfig：字段形状不对也给人话 ConfigError，不甩 TypeError / SyntaxError', () => {
   const cases = [['null', /对象/], ['[]', /对象/], [JSON.stringify({ ...MIN, aliases: [['(', 'x']] }), /aliases/], [JSON.stringify({ ...MIN, aliases: ['modelplan'] }), /aliases/],
-    [JSON.stringify({ ...MIN, bot_env: '~/.lark-bot' }), /bot_env/], [JSON.stringify({ ...MIN, memory_dir: 5 }), /memory_dir/], [JSON.stringify({ ...MIN, leaders: '李四' }), /leaders/]];
+    [JSON.stringify({ ...MIN, bot_env: '~/.lark-bot' }), /bot_env/], [JSON.stringify({ ...MIN, memory_dir: 5 }), /memory_dir/], [JSON.stringify({ ...MIN, leaders: '李四' }), /leaders/],
+    [JSON.stringify({ ...MIN, auto_react: 'false' }), /auto_react/]];
   for (const [raw, re] of cases) {
     const { home, fra } = fixture(raw);
     assert.throws(() => loadConfig({ env: { FRA_HOME: fra }, home }), (e) => e instanceof ConfigError && re.test(e.message) && e.message.includes('bin/fra setup'), raw);
@@ -122,4 +124,12 @@ test('照模板原样复制：记忆目录在 FRA_HOME 下，没有示例上级'
   const c = loadConfig({ env: { FRA_HOME: fra }, home });
   assert.equal(c.memoryDir, path.join(fra, 'memory'));
   assert.deepEqual(c.leaders, []);
+});
+
+test('loadConfig：auto_react 写 false 就不点表情；照模板复制默认点', () => {
+  const { home, fra } = fixture({ ...MIN, auto_react: false });
+  assert.equal(loadConfig({ env: { FRA_HOME: fra }, home }).autoReact, false);
+  const t = JSON.parse(fs.readFileSync('templates/config.example.json', 'utf8'));
+  const x = fixture({ ...t, ...MIN });
+  assert.equal(loadConfig({ env: { FRA_HOME: x.fra }, home: x.home }).autoReact, true);
 });

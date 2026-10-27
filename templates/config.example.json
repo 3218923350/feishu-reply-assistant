@@ -22,6 +22,8 @@
   "secret_prefixes": [],
   "//legacy_work_dir": "可选。早期版本起草时用的工作目录（只有从旧版升级的人需要）",
   "legacy_work_dir": null,
+  "//auto_react": "可选。开始处理时以你的身份在对方消息上点「了解」表情（对方看得到，知道你在处理）；不想点写 false",
+  "auto_react": true,
   "//launchd_label": "可选。launchd 服务名，默认 com.feishu-reply-assistant",
   "launchd_label": "com.feishu-reply-assistant"
 }

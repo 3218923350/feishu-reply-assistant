@@ -129,7 +129,8 @@ const botSendCard = (c) => lark(['im', '+messages-send', '--as', 'bot', '--chat-
 const botReplyCard = (msgId, c) => lark(['im', '+messages-reply', '--as', 'bot', '--message-id', msgId, '--msg-type', 'interactive', '--content', JSON.stringify(c)], true);
 const patchCard = (msgId, c) => lark(['im', 'messages', 'patch', '--as', 'bot', '--params', JSON.stringify({ message_id: msgId }), '--data', JSON.stringify({ content: JSON.stringify(c) })], true);
 // 开始处理就以我的身份在他那条消息上点「了解」(Get)：他知道在处理，我在会话里也看得到。点了就不撤（已经让人知道在做了）；同一个表情重复点是幂等的
-const react = (msgId) => lark(['im', 'reactions', 'create', '--as', 'user', '--params', JSON.stringify({ message_id: msgId }), '--data', JSON.stringify({ reaction_type: { emoji_type: 'Get' } })])
+// 配置里 auto_react: false 就不点
+const react = (msgId) => cfg.autoReact && lark(['im', 'reactions', 'create', '--as', 'user', '--params', JSON.stringify({ message_id: msgId }), '--data', JSON.stringify({ reaction_type: { emoji_type: 'Get' } })])
   .catch((e) => log('ERR react', msgId, e.message));
 const jsonl = (f) => readJsonl(f, { onBad: (l) => log('ERR jsonl', f, l.slice(0, 120)) }); // 坏行跳过，别卡住整轮
 const readCommits = () => jsonl(COMMITS);

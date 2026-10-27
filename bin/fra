@@ -121,6 +121,7 @@ async function setup({ noStart = false } = {}) {
       const p = await ask('你们公司的 key 有固定前缀吗（比如 abc_xxxx 就写 abc，多个用逗号隔开；没有直接回车）');
       next.secret_prefixes = p ? p.split(/[,，\s]+/).filter(Boolean) : [];
     }
+    if (next.auto_react == null) next.auto_react = await yes('开始处理时以你的身份在对方消息上点「了解」表情（对方看得到，知道你在处理）？以后可以在 config.json 里改 auto_react', true);
     fs.writeFileSync(cfgFile, JSON.stringify(next, null, 2) + '\n');
     console.log(`✓ 写好 ${cfgFile}`);
     const about = path.join(home, 'about-me.md');
@@ -163,7 +164,7 @@ async function setup({ noStart = false } = {}) {
     const install = path.join(REPO, 'install.sh');
     const aboutReady = !(await runChecks({ load: () => loadConfig(), run, repo: REPO })).some((c) => c.name === '关于我' && c.ok === false);
     if (!aboutReady) console.log(`\n⚠️ 关于我还没改（${path.join(home, 'about-me.md')}）：现在启动的话，草稿会照着模板里的示例身份写。建议先改好再启动。`);
-    const start = !noStart && await yes(`现在启动常驻服务和每天 06:30 的记忆日报？启动后每 90 秒以你的身份搜一次消息，开始处理时在对方消息上点「了解」表情`, aboutReady);
+    const start = !noStart && await yes(`现在启动常驻服务和每天 06:30 的记忆日报？启动后每 90 秒以你的身份搜一次消息${cfg.autoReact ? '，开始处理时在对方消息上点「了解」表情' : ''}`, aboutReady);
     if (!start) { fs.writeFileSync(mark, ''); console.log(`⏭ 没启动常驻服务；准备好了跑 ${install}`); }
     else { fs.rmSync(mark, { force: true }); if (!interactive(install, [])) throw new Error('install.sh 失败'); }
 

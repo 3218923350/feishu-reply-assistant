@@ -11,7 +11,7 @@ A Feishu (Lark) reply assistant for one person on one Mac. It watches messages t
 ```
 每 90 秒搜一次 @我 + 私聊 → 去掉 @所有人、机器人、我已经回过的
   → 同一个人的连发合成一件事；纯「好的 / 谢谢」不起草
-  → 以你的身份在对方消息上点个「了解」表情（对方知道你在处理）
+  → 以你的身份在对方消息上点个「了解」表情（对方知道你在处理；不想点就把配置里的 `auto_react` 改成 false）
   → 预取：人物卡、相关记忆、你在这个会话说过的话、本地 agent 会话片段（装了 Orca 才有）
   → claude -p 起草：什么命令都能跑、只查不改，唯独不能发飞书消息
   → 草稿群里出一张卡：原消息、可直接改的拟发送、「发送 / 按我说的办 / 不发」，查证过程收在折叠里
@@ -49,10 +49,10 @@ setup 做的事：
 1. 检查 macOS / Node / Claude Code / lark-cli。
 2. 让 lark-cli 绑定你的飞书应用并以你的身份登录，记下你的 open_id。
 3. 问机器人是否用同一个应用（默认是，最省事）；用机器人建「飞书回复草稿箱」群并把你拉进去。
-4. 写 `~/.feishu-reply-assistant/config.json`，复制「关于我」模板。
+4. 问开始处理时要不要在对方消息上点「了解」表情，写 `~/.feishu-reply-assistant/config.json`，复制「关于我」模板。
 5. 建记忆目录（本机 git 仓库，不配远端）。
 6. 在 Claude Code 里装记忆 hook（每次提问自动带上相关记忆）和「先 `mem search`」那段全局说明；把 `mem` 命令链到 `~/.local/bin`（`~/.local/bin` 不在 PATH 里时只提示、不链）。
-7. 问你要不要现在启动两个 launchd 服务（常驻助手 + 每天 06:30 的记忆日报）。启动后每 90 秒以你的身份搜一次消息，开始处理时会在对方消息上点「了解」表情，这是对外可见的。改了代码之后重跑 `./install.sh` 就是重启。
+7. 问你要不要现在启动两个 launchd 服务（常驻助手 + 每天 06:30 的记忆日报）。启动后每 90 秒以你的身份搜一次消息，开始处理时会在对方消息上点「了解」表情（`auto_react` 为 false 时不点），这是对外可见的。改了代码之后重跑 `./install.sh` 就是重启。
 8. 问要不要冷启动：从最近 30 天的飞书抽记忆（scripts/coldstart.sh，先拉消息、报批次数，再问一次，会花 Claude 的钱）。
 
 doctor 检查的项：系统是 macOS、Node ≥ 24、Claude Code、lark-cli、git、配置文件、关于我、飞书用户身份、机器人身份、草稿群、卡片回调、记忆目录、记忆检索、Claude Code 记忆 hook、全局 CLAUDE.md、mem 命令、常驻服务、每日任务、Orca（可选）。
@@ -78,6 +78,7 @@ doctor 检查的项：系统是 macOS、Node ≥ 24、Claude Code、lark-cli、g
 | `aliases` | 否 | 记忆检索的同义词 `[["正则", "补上的写法"], ...]` |
 | `secret_prefixes` | 否 | 你们公司 key 的固定前缀（如 `abc_xxxx` 写 `abc`），外发和清理检查都会拦 |
 | `legacy_work_dir` | 否 | 只有从早期版本升级的人需要 |
+| `auto_react` | 否 | 开始处理时以你的身份在对方消息上点「了解」表情，默认 `true`；不想点写 `false`，改完重跑 `./install.sh` |
 | `launchd_label` | 否 | launchd 服务名，默认 `com.feishu-reply-assistant` |
 
 ## 日常怎么用

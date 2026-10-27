@@ -21,7 +21,7 @@
 | 搜 @我 / 私聊我的消息 | `im +messages-search` | `search:message` |
 | 拉会话上下文、话题、卡片 | `im +chat-messages-list`、`im +threads-messages-list`、`im +messages-mget` | `im:message:readonly`、`im:message.group_msg:get_as_user`、`im:message.p2p_msg:get_as_user`、`im:chat:read`、`contact:user.base:readonly` |
 | 以你的身份回复 / 发消息（发送、`bin/fr`） | `im +messages-reply`、`im +messages-send` | `im:message`、`im:message.send_as_user` |
-| 在对方消息上点「了解」表情 | `im reactions create` | `im:message.reactions:write_only` |
+| 在对方消息上点「了解」表情（配置 `auto_react` 为 false 时不点） | `im reactions create` | `im:message.reactions:write_only` |
 | 发附件；起草时下载消息里的图片看 | `im +messages-reply --file`、`im +messages-resources-download`（起草的 Claude 用） | `im:resource` |
 | 按名字找人、找群（`bin/fr --to 人名`） | `contact +search-user`、`contact +get-user`、`im +chat-search` | `contact:user:search`、`contact:user.base:readonly`、`im:chat:read` |
 
