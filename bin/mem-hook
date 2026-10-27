@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { DEFAULT_ROOTS, openIndex, refresh } from '../lib/memory/index.mjs';
+import { DEFAULT_ROOTS, readIndex } from '../lib/memory/index.mjs';
 import { promptHook } from '../lib/memory/hook.mjs';
 import { loadConfig } from '../lib/config.mjs';
 
@@ -11,8 +11,7 @@ import { loadConfig } from '../lib/config.mjs';
 try {
   const cfg = loadConfig();
   const { prompt } = JSON.parse(fs.readFileSync(0, 'utf8') || '{}');
-  const db = openIndex(path.join(cfg.memoryDir, '.mem-index.sqlite'));
-  refresh(db, DEFAULT_ROOTS(os.homedir(), cfg.memoryDir));
+  const db = readIndex(path.join(cfg.memoryDir, '.mem-index.sqlite'), DEFAULT_ROOTS(os.homedir(), cfg.memoryDir));
   const out = promptHook(db, prompt, { ignore: [cfg.name], aliases: cfg.aliases });
   if (out) process.stdout.write(JSON.stringify(out));
 } catch {

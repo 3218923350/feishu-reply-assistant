@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { DEFAULT_ROOTS, openIndex, refresh, search, who } from '../lib/memory/index.mjs';
+import { DEFAULT_ROOTS, openIndex, readIndex, refresh, search, who } from '../lib/memory/index.mjs';
 import { acceptEntry, addItems, listPending, rejectEntry } from '../lib/memory/add.mjs';
 import { withLock } from '../lib/memory/lock.mjs';
 import { ConfigError, loadConfig } from '../lib/config.mjs';
@@ -26,13 +26,13 @@ function parseArgs(argv) {
   return { opts, pos };
 }
 
+const ROOTS = () => DEFAULT_ROOTS(HOME, MEM_DIR);
 function index() {
   if (!fs.existsSync(MEM_DIR)) { console.error(`记忆目录 ${MEM_DIR} 不存在：先跑 bin/fra setup，或改 config.json 的 memory_dir`); process.exit(2); }
-  let db;
-  try { db = openIndex(DB); } catch (e) { console.error(`记忆目录 ${MEM_DIR} 用不了（${e.message}）`); process.exit(2); }
-  refresh(db, DEFAULT_ROOTS(HOME, MEM_DIR));
-  return db;
+  try { return readIndex(DB, ROOTS()); } catch (e) { console.error(`记忆目录 ${MEM_DIR} 用不了（${e.message}）`); process.exit(2); }
 }
+// 写完马上刷新，命令返回时就能搜到；刷不进去（索引正被写着）也不算失败，下一次读会补上
+const reindexAfterWrite = () => { try { refresh(openIndex(DB), ROOTS(), { wait: 5_000 }); } catch {} };
 
 // 记忆目录是 git 仓库就提交一次（方便回看和撤销）；不是就算了，条目已经写进去了
 function commit(message) {
@@ -110,6 +110,7 @@ switch (cmd) {
       commit(opts.message || `mem add: ${r.length} 条`);
       return r;
     });
+    reindexAfterWrite();
     const n = (a) => results.filter((r) => r.action === a).length;
     if (opts.json) out(results);
     else {
@@ -132,10 +133,11 @@ switch (cmd) {
       }
       commit(`mem ${cmd}: ${pos.length} 条`);
     });
+    reindexAfterWrite();
     break;
   case 'reindex':
-    fs.rmSync(DB, { force: true });
-    console.log(`已重建索引：${refresh(openIndex(DB), DEFAULT_ROOTS(HOME, MEM_DIR)).changed} 个文件`);
+    // 清空和重填在同一个事务里：重建的时候别人照读旧的，不会看到空索引
+    console.log(`已重建索引：${refresh(openIndex(DB), ROOTS(), { rebuild: true }).changed} 个文件`);
     break;
   default:
     console.log(`用法：

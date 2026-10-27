@@ -56,7 +56,7 @@ mem who <姓名|open_id> [--id ou_xxx] [--json]   # 人物卡（带 open_id 时�
 mem add [文件|-] [--message 提交说明]          # JSON 数组或 JSONL，字段见 schema/memory.json
 mem review [--json]                            # 列出待确认
 mem accept <路径> / mem reject <路径>          # 只处理 inbox 里待确认的；已经入库的条目写错了，直接改或删那个 .md 文件再 git commit
-mem reindex                                    # 重建检索索引（平时每次搜索会自动增量刷新）
+mem reindex                                    # 重建检索索引（平时不用：每次搜索先比一下文件有没有变，变了就增量刷新）
 ```
 
 `mem add` 的输入是 JSON 数组（或一行一个 JSON），每条都要有这些字段，缺了整批拒收：
@@ -69,6 +69,8 @@ mem reindex                                    # 重建检索索引（平时每�
 正文写在 `content`（多条事实用换行分开，每行以日期开头）；`review` 填 `auto` 或 `pending`；`updated` 由程序填。已有同类型、同标题（人物按姓名 / open_id）的条目时，会追加到那一条而不是新建。
 
 检索是 SQLite 全文索引，中文按相邻两个字切词；配置里的 `aliases` 可以补同义词（比如口语里的「开个 key」对应记忆里的「开通 key」）。
+
+很多进程同时查（每次提问的 hook、起草前的预取、Claude 会话里的 mem）也不会排队：索引是 WAL 模式，查的时候不拿锁；每次查之前只 stat 一遍文件和索引比，有变化时试一下写锁，抢到的那个顺手刷新，抢不到就读上一次提交的。`mem add` / 确认 / 删除写完马上刷新，命令返回就能搜到；Claude Code 等直接写进目录的记忆，下一次查就能搜到。索引在记忆目录下的 `.mem-index.sqlite*`，删掉会自动重建。
 
 ## 记忆从哪来
 
