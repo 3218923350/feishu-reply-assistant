@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { prefetch } from './lib/prefetch.mjs';
-import { burstKey, handledBy, myReplies, nextBatches, settle, shouldDraft, skipAck } from './lib/inbox.mjs';
+import { burstKey, handledBy, myReplies, nextBatches, settle, shouldDraft, skipAck, watchedThreadReply } from './lib/inbox.mjs';
 import { DRAFT_PERMS, EXEC_DENY } from './lib/tools.mjs';
 import { parseReview } from './lib/review.mjs';
 import { apiError, approvePrompt, chunk, claim, isExternalDenied, isVerified, manualNotice, owner, retryPrompt, route, threadReplies, wakePrompt, workPrompt } from './lib/commands.mjs';
@@ -49,6 +49,7 @@ const PROMPT = fill(fs.readFileSync(new URL('./prompt.md', import.meta.url), 'ut
 
 const POLL_MS = 90_000; // 扫收件箱
 const CONFIRM_MS = 20_000; // 扫草稿群
+const THREAD_FOLLOW_MS = 6 * 3600_000; // 助手在群里开的话题只自动跟 6 小时
 const OVERLAP_MS = 10 * 60_000; // 两次扫描时间窗重叠，防漏
 const FIRST_LOOKBACK_MS = 60 * 60_000; // 首次启动回看
 const MAX_PARALLEL = 2; // 同时跑的 claude 数
@@ -93,10 +94,14 @@ const state = fs.existsSync(STATE_FILE)
   ? JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'))
   : { lastPollAt: 0, lastConfirmAt: 0, seen: {}, items: {} };
 state.queue ||= []; // 待起草的消息，处理完才移除，重启后接着做
+state.threads ||= {}; // 助手发过消息、且要跟随回复的已知话题
+state.threadLookups ||= {}; // message_id -> { thread_id, at }，避免每轮重复查
 function saveState() {
   const now = Date.now();
   for (const [k, t] of Object.entries(state.seen)) if (now - t > 3 * 86400_000) delete state.seen[k];
   for (const [k, it] of Object.entries(state.items)) if (now - it.createdAt > 14 * 86400_000) delete state.items[k];
+  for (const [k, t] of Object.entries(state.threads)) if (now - (t.created_at || 0) > THREAD_FOLLOW_MS) delete state.threads[k];
+  for (const [k, t] of Object.entries(state.threadLookups)) if (now - (t?.at || 0) > 3 * 86400_000) delete state.threadLookups[k];
   fs.writeFileSync(STATE_FILE + '.tmp', JSON.stringify(state, null, 1));
   fs.renameSync(STATE_FILE + '.tmp', STATE_FILE);
 }
@@ -150,8 +155,64 @@ const alert = makeAlerter({ send: (md) => botSend(md), log }); // 每类一小�
 const fmtMsg = (x) =>
   `[${x.create_time}] ${x.sender?.name || x.sender?.id || '?'}${x.sender?.id === ME ? '(我)' : ''}: ${(x.content || '').replace(/\n/g, ' ⏎ ')}`;
 
+// 助手发出的消息如果形成了飞书话题，记下 thread_id；之后只跟随这个已知话题里原收件人的回复
+async function registerThreadForMessage(messageId, info = {}, baselineAt = Date.now()) {
+  if (!messageId || state.threadLookups[messageId]) return;
+  state.threadLookups[messageId] = { thread_id: '', at: Date.now() };
+  try {
+    const d = await lark(['im', '+messages-mget', '--as', 'user', '--message-ids', messageId, '--no-reactions']);
+    const sent = (d.messages || [])[0];
+    const tid = sent?.thread_id;
+    state.threadLookups[messageId] = { thread_id: tid || '', at: Date.now() };
+    if (!tid || info.chat_type === 'p2p' || !info.chat_id || info.chat_id === DRAFT_CHAT || !info.sender_id || info.sender_id === ME) return;
+    const old = state.threads[tid] || {};
+    const now = Date.now();
+    state.threads[tid] = {
+      thread_id: tid, chat_id: info.chat_id, chat_name: info.chat_name || old.chat_name || '',
+      chat_type: info.chat_type || old.chat_type || 'group', watch_sender_id: info.sender_id,
+      root_message_id: messageId, created_at: old.created_at || now, baseline_at: old.baseline_at || baselineAt,
+      last_seen_at: old.last_seen_at || baselineAt, updated_at: now,
+    };
+    log('thread', `登记 ${tid}（${info.chat_name || info.chat_id}）`);
+  } catch (e) { log('ERR thread-register', messageId, e.message); }
+  saveState();
+}
+
+async function syncSentThreads() {
+  const pending = recentEvents().filter((e) => (e.kind === 'fr-sent' || e.kind === 'sent') && e.message_id
+    && !state.threadLookups[e.message_id]).slice(-30);
+  for (const e of pending) {
+    const ts = Date.parse(e.ts);
+    await registerThreadForMessage(e.message_id, e.orig || {}, Math.max(Number.isFinite(ts) ? ts : Date.now(), Date.now() - 10 * 60_000));
+  }
+}
+
+async function pollKnownThreads(now) {
+  const threads = Object.values(state.threads).filter((t) => t.watch_sender_id && t.thread_id
+    && t.chat_type !== 'p2p' && now - (t.created_at || 0) <= THREAD_FOLLOW_MS)
+    .sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0)).slice(0, 50);
+  const out = [];
+  for (const t of threads) {
+    try {
+      const d = await lark(['im', '+threads-messages-list', '--as', 'user', '--thread', t.thread_id,
+        '--order', 'desc', '--page-size', '50', '--no-reactions']);
+      let latest = t.last_seen_at || t.baseline_at || now;
+      for (const m of d.messages || []) {
+        const ts = parseBJ(m.create_time);
+        if (ts > latest) latest = ts;
+        if (!watchedThreadReply(m, t, state.seen, ME)) continue;
+        if (ts < (t.last_seen_at || t.baseline_at || now) - 60_000) continue;
+        out.push({ ...m, chat_id: t.chat_id, chat_type: t.chat_type, chat_name: t.chat_name, thread_id: t.thread_id, known_thread: true });
+      }
+      t.last_seen_at = latest; t.last_checked_at = now; t.updated_at = now;
+    } catch (e) { log('ERR thread', t.thread_id, e.message); }
+  }
+  return out;
+}
+
 async function pollInbox() {
   const now = Date.now();
+  await syncSentThreads();
   const since = state.lastPollAt ? state.lastPollAt - OVERLAP_MS : now - FIRST_LOOKBACK_MS;
   const common = ['im', '+messages-search', '--as', 'user', '--query', '', '--start', fmtBJ(since), '--end', fmtBJ(now + 60_000),
     '--page-size', '50', '--page-all', '--page-limit', '20', '--no-reactions'];
@@ -171,17 +232,18 @@ async function pollInbox() {
       for (const d of await Promise.all(lists)) inChats.push(...(d.messages || []).map((m) => ({ ...m, chat_id: c.chat_id })));
     } catch (e) { log('ERR followup-chat', c.chat_id, e.message); }
   }
+  const knownThreads = await pollKnownThreads(now);
   state.lastPollAt = now;
 
   const fresh = [];
-  for (const m of [...atMe, ...p2p, ...inChats]) {
+  for (const m of [...atMe, ...p2p, ...inChats, ...knownThreads]) {
     if (state.seen[m.message_id]) continue;
     if (m.sender?.id === ME || m.sender?.sender_type !== 'user') continue;
     if (m.chat_id === DRAFT_CHAT) continue;
     if (['system', 'interactive', 'sticker', 'share_chat', 'share_user'].includes(m.msg_type)) continue;
     const f = matchFollowup(m, followups, now); // 在等这个人回复：叫醒原会话，不另起草
     if (f) { state.seen[m.message_id] = now; react(m.message_id); wake(f, m).catch((e) => log('ERR wake', e.message)); continue; }
-    if (m.chat_type !== 'p2p' && !(m.mentions || []).some((x) => x.id === ME)) continue; // 只 @所有人 的、群里没 @我 的不算
+    if (m.chat_type !== 'p2p' && !m.known_thread && !(m.mentions || []).some((x) => x.id === ME)) continue; // 已知话题只看原收件人；其他群消息仍要 @我
     state.seen[m.message_id] = now;
     fresh.push(m);
     enqueue(m);
@@ -205,13 +267,14 @@ async function gatherContext(m) {
   const end = parseBJ(m.create_time) + 60_000;
   const d = await lark(['im', '+chat-messages-list', '--as', 'user', '--chat-id', m.chat_id, '--end', fmtBJ(end),
     '--order', 'desc', '--page-size', '20', '--no-reactions']);
-  const msgs = (d.messages || []).reverse();
-  const lines = msgs.map(fmtMsg);
+  let msgs = (d.messages || []).reverse().filter((x) => x.message_id !== m.message_id);
+  let prefix = [];
   if (m.thread_id) {
     const t = await lark(['im', '+threads-messages-list', '--as', 'user', '--thread', m.thread_id, '--order', 'asc', '--page-size', '30', '--no-reactions']);
-    lines.push('--- 话题内消息 ---', ...(t.messages || []).map(fmtMsg));
+    const tmsgs = (t.messages || []).filter((x) => x.message_id !== m.message_id);
+    if (tmsgs.length) { msgs = tmsgs; prefix = ['--- 话题内消息（当前话题） ---']; }
   }
-  return { text: lines.join('\n'), msgs };
+  return { text: [...prefix, ...msgs.map(fmtMsg)].join('\n'), msgs };
 }
 
 // ---------- Claude ----------
@@ -334,7 +397,7 @@ async function sendReply(item, draftId, { edited = false } = {}) {
   if (!claim(item, 'sending')) return; // 先占住，连点两次也只发一次
   saveState();
   const args = ['im', '+messages-reply', '--as', 'user', '--message-id', item.orig.message_id, '--text', item.draft];
-  if (item.orig.thread_id) args.push('--reply-in-thread');
+  if (item.orig.chat_type !== 'p2p') args.push('--reply-in-thread'); // 群里统一开话题；单聊留在主消息流
   let d, via = '';
   try { d = await lark(args); } catch (e) {
     item.status = 'pending';
@@ -363,6 +426,7 @@ async function sendReply(item, draftId, { edited = false } = {}) {
     }
   }
   state.seen[d.message_id] = Date.now(); // 自己发的这条别再当成指令
+  await registerThreadForMessage(d.message_id, item.orig); // 发给原会话的消息若形成话题，后续跟随
   item.status = 'sent';
   saveState();
   outcome(draftId, item, edited ? 'send_edited' : 'send');
@@ -374,7 +438,7 @@ async function sendReply(item, draftId, { edited = false } = {}) {
   const sentFiles = [];
   for (const f of via === 'web' ? [] : item.files || []) {
     const fa = ['im', '+messages-reply', '--as', 'user', '--message-id', item.orig.message_id, '--file', path.basename(f)];
-    if (item.orig.thread_id) fa.push('--reply-in-thread');
+    if (item.orig.chat_type !== 'p2p') fa.push('--reply-in-thread');
     try { const r = await lark(fa, false, path.dirname(f)); state.seen[r.message_id] = Date.now(); sentFiles.push(f); }
     catch (e) { log('ERR file', f, e.message); botReply(draftId, `⚠️ 文字已发，文件没发出去：${f}（${e.message.slice(0, 120)}）`).catch(() => {}); }
   }
