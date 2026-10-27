@@ -31,6 +31,14 @@ test('私聊话题里别把另一个话题的回复算成已回复；同话题�
   assert.equal(repliedTo(q, [mine({ thread_id: 'omt_a' })], ME), true);
   assert.equal(repliedTo(q, [mine({ reply_to: 'om_q' })], ME), true);
 });
+// PR #1 review：话题里我 12:27 回了他，他 12:27 又接了一句——时间只到分，以前会把我那句当成回了他这句，这句就漏了
+test('同一分钟里我先说、他后说：不算回过他这句（按倒序列表里的先后判断）', () => {
+  const q = { ...m, message_id: 'om_his', thread_id: 'omt_a', create_time: '2026-10-27 12:27' };
+  const my = mine({ message_id: 'om_my', thread_id: 'omt_a', create_time: '2026-10-27 12:27' });
+  assert.equal(repliedTo(q, [q, my], ME, [[q, my]]), false); // 倒序：他在前（新）、我在后（早）
+  assert.equal(repliedTo(q, [my, q], ME, [[my, q]]), true); // 倒序：我在前 = 我后说，算回过
+  assert.equal(repliedTo(q, [q, my], ME), true); // 不给列表顺序：照旧按分钟算（同一分钟算回过）
+});
 test('已知话题自动跟随：只认原收件人的新回复，不认其他人和自己', () => {
   const t = { thread_id: 'omt_a', root_message_id: 'om_root', watch_sender_id: 'ou_u10' };
   const reply = { message_id: 'om_new', sender: { id: 'ou_u10', sender_type: 'user' } };

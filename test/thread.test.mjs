@@ -99,6 +99,12 @@ test('同意所选：授权原话就是勾了的那几项；没勾的写明不�
   assert.match(intro, /没勾.*公开组也摘.*不要做/s);
   assert.match(intro, /摘好了，你再跑一遍/);
 });
+test('办完发的话留空：只办不发，授权原话里不带发送那句（fr send 按它校验会被拒）', () => {
+  const { authText, intro } = approvePrompt([{ id: 'ark', label: '摘掉 B 组的自部署成员' }], ['ark'], '  ', '周八');
+  assert.ok(!/发给周八/.test(authText));
+  assert.match(intro, /不要以他身份发任何消息/);
+  assert.ok(!/用 fr send/.test(intro));
+});
 
 // 2026-10-26 事故：seen 3 天过期，而话题里还有 3 天内的卡，10-23 我在话题里说的「先给他 tpm 和并发提高吧」被当成新吩咐又办了一遍
 test('话题里只认这轮拉取窗口里的新话（create_time 是北京时间、精确到分），老话 seen 过期了也不重放', () => {

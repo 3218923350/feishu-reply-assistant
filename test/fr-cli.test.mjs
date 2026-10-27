@@ -54,6 +54,13 @@ test('回原消息：话题里回，记回执', () => {
   assert.match(s.calls(), /\+messages-reply .*--message-id om_orig .*--reply-in-thread/);
   const e = s.events().find((x) => x.kind === 'fr-sent');
   assert.deepEqual([e.card, e.toName, e.text], ['om_card', '冯五', '不是 504']);
+  assert.deepEqual([e.orig.message_id, e.orig.sender_id, e.orig.chat_type], ['om_orig', 'ou_u4', 'group']); // 助手据此跟随话题
+});
+
+test('发给点了名的人：回执不带原消息（不跟随那边的话题）', () => {
+  const s = setup();
+  assert.equal(s.fr('send', '--to', '赵六', '--text', '麻烦看下 WAF', '--why', '找一下赵六').status, 0);
+  assert.equal(s.events().find((x) => x.kind === 'fr-sent').orig, undefined);
 });
 
 test('群消息即使原来不在话题，也开话题回复；私聊继续走主消息流', () => {

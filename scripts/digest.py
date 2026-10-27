@@ -99,7 +99,7 @@ def main(day, status):
     if review_md: parts.append(review_md)
     if conflicts: parts.append(f'**说法冲突 {len(conflicts)} 条**（Claude Code 里看两条原文再定）\n{lst(conflicts)}')
     owed = open_commitments(fra_config.read_jsonl(COMMITS))
-    if owed: parts.append(f'**以你身份答应了、还没做的 {len(owed)} 条**（去那张卡点「去做」，或在卡下说「不做了」）\n{lst(owed)}')
+    if owed: parts.append(f'**以你身份答应了、还没做的 {len(owed)} 条**（去那张卡点「去办答应的事」，或在卡下说「不做了」）\n{lst(owed)}')
     md = '\n\n'.join(parts)
     r = subprocess.run([fra_config.bin_path('lark-cli'), 'im', '+messages-send', '--as', 'bot', '--chat-id', cfg['draft_chat_id'], '--markdown', md],
                        env=fra_config.bot_env(cfg), capture_output=True, text=True)
