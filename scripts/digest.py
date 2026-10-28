@@ -68,7 +68,7 @@ def cost_summary(events, now_ms):
     if other: parts.append(f"记忆整理 ${usd(other):.2f}")
     return f"**过去 24 小时花费** ${usd(xs):.2f}：" + '、'.join(parts)
 
-REASONS = ['查错或跑偏', '他自己办了', '口径不同', '先反问', '没听懂意图', '只是改短', '接着说别的']
+REASONS = ['判了不用回', '查错或跑偏', '他自己办了', '口径不同', '先反问', '没听懂意图', '只是改短', '接着说别的']
 
 def self_handled(d):
     """昨天我没用草稿、自己在原会话回掉的卡（collect_signals 编号 + 抽取时归的类）→ 日报一节；没有就空串。
@@ -83,15 +83,16 @@ def self_handled(d):
     except Exception: pass
     why = {r.get('n'): r for r in so.get('reviews') or [] if r.get('reason') in REASONS}
     count = {k: sum(why.get(x['n'], {}).get('reason') == k for x in items) for k in REASONS}
-    head = f'**你自己回掉的卡 {len(items)} 张**（有草稿、你没用）：' + '、'.join(f'{k} {v}' for k, v in count.items() if v)
+    sk = sum(bool(x.get('skipped')) for x in items)
+    head = f'**你自己回掉的卡 {len(items)} 张**（有草稿你没用{f"，或助手判了不用回你却回了 {sk} 张" if sk else ""}）：' + '、'.join(f'{k} {v}' for k, v in count.items() if v)
     if len(why) < len(items): head += f'{"、" if why else ""}没归类 {len(items) - len(why)}'
     rest = [f"另有没草稿的 {sig['no_draft']} 张" if sig.get('no_draft') else '', f"回的是同一个人后来那张卡的 {sig['unpaired']} 张不算" if sig.get('unpaired') else '']
     if any(rest): head += '（' + '，'.join(x for x in rest if x) + '）'
     cut = lambda t, n: t if len(t) <= n else t[:n] + '…'
     one = lambda t: re.sub(r'<at [^>]*>([^<]*)</at>', r'@\1', ' '.join(str(t).split()))  # 压成一行，<at> 换成 @名字
     wrong = [f"- {x['sender']}：{one(why[x['n']].get('note') or '')}\n  草稿：{cut(one(x['draft']), 80)}\n  你回：{cut(one(' / '.join(x['actual'])), 80)}"
-             for x in items if why.get(x['n'], {}).get('reason') == '查错或跑偏']
-    return head + ('\n**查错或跑偏的**\n' + '\n'.join(wrong) if wrong else '')
+             for x in items if why.get(x['n'], {}).get('reason') in ('查错或跑偏', '判了不用回')]
+    return head + ('\n**查错或跑偏 / 判了不用回的**\n' + '\n'.join(wrong) if wrong else '')
 
 def main(day, status):
     cfg = fra_config.load_or_exit()

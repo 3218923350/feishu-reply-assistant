@@ -43,13 +43,20 @@ class SelfHandled(unittest.TestCase):
                      [{'n': 1, 'reason': '查错或跑偏', 'note': '网关根本没用这个模型'}, {'n': 2, 'reason': '他自己办了', 'note': ''}, {'n': 3, 'reason': '只是改短', 'note': ''}],
                      no_draft=4, unpaired=2)
         md = self_handled(d)
-        self.assertIn('**你自己回掉的卡 3 张**（有草稿、你没用）：查错或跑偏 1、他自己办了 1、只是改短 1（另有没草稿的 4 张，回的是同一个人后来那张卡的 2 张不算）', md)
+        self.assertIn('**你自己回掉的卡 3 张**（有草稿你没用）：查错或跑偏 1、他自己办了 1、只是改短 1（另有没草稿的 4 张，回的是同一个人后来那张卡的 2 张不算）', md)
         self.assertIn('- 钱二：网关根本没用这个模型\n  草稿：先帮我们恢复到 500w TPM 吧\n  你回：我看我这里没有模型 B 这个', md)
         self.assertNotIn('孙七', md)
 
+    def test_skipped_listed_with_wrong_ones(self):
+        items = [{'n': 1, 'card': None, 'sender': '李四', 'chat': '对接群', 'draft': '（判了不用回：李四说加完了）', 'actual': ['看了，到账了'], 'skipped': True},
+                 {'n': 2, 'card': 'c', 'sender': '王五', 'chat': '私聊', 'draft': 'a', 'actual': ['b']}]
+        md = self_handled(self.day(items, [{'n': 1, 'reason': '判了不用回', 'note': '对方让你看一下，该回'}, {'n': 2, 'reason': '只是改短', 'note': ''}]))
+        self.assertIn('**你自己回掉的卡 2 张**（有草稿你没用，或助手判了不用回你却回了 1 张）：判了不用回 1、只是改短 1', md)
+        self.assertIn('**查错或跑偏 / 判了不用回的**\n- 李四：对方让你看一下，该回', md)
+
     def test_unclassified_and_empty(self):
         d = self.day([{'n': 1, 'card': 'c', 'sender': 'x', 'chat': '私聊', 'draft': 'a', 'actual': ['b']}])  # 抽取失败、没有 reviews
-        self.assertEqual(self_handled(d), '**你自己回掉的卡 1 张**（有草稿、你没用）：没归类 1')
+        self.assertEqual(self_handled(d), '**你自己回掉的卡 1 张**（有草稿你没用）：没归类 1')
         self.assertEqual(self_handled(self.day([])), '')
         self.assertEqual(self_handled(Path(tempfile.mkdtemp())), '')
         bad = self.day([{'n': 1, 'card': 'c', 'sender': 'x', 'chat': '私聊', 'draft': 'a', 'actual': ['b']}], [{'n': 1, 'reason': '瞎编的类', 'note': ''}])

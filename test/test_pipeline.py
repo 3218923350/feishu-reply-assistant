@@ -157,6 +157,19 @@ class SignalsSkipBadLines(unittest.TestCase):
         self.assertEqual([(x['n'], x['sender'], x['card']) for x in sig['items']], [(1, '李四', 'om_李四'), (2, '孙七', 'om_孙七')])
         self.assertEqual((sig['no_draft'], sig['unpaired']), (1, 1))
 
+    def test_skipped_but_replied_is_numbered(self):
+        """助手判了不用回（没出卡）、他却回了：也编号归类，草稿写明判了不用回；不算「没草稿」"""
+        env = cfg_env()
+        ev = Path(env['FRA_HOME']) / 'events'; ev.mkdir()
+        e = {'ts': '2026-10-22T04:00:00Z', 'kind': 'manual-reply', 'orig': {'sender_name': '李四', 'chat_name': '对接群', 'content': '加完了 您这边看一下'}, 'draft': '', 'skipped': '李四说加完了，不用回', 'actual': ['看了，到账了']}
+        (ev / '2026-10.jsonl').write_text(json.dumps(e, ensure_ascii=False) + '\n')
+        d = Path(tempfile.mkdtemp())
+        subprocess.run([sys.executable, str(HERE / 'collect_signals.py'), str(d), '2026-10-22'], check=True, capture_output=True, env={**env, 'FRA_LARK': '/usr/bin/false'})
+        self.assertIn('### #1 李四（对接群）\n原消息：加完了 您这边看一下\n助手草稿：（判了不用回，没出卡：李四说加完了，不用回）', (d / 'batches' / 'zz-signals.md').read_text())
+        sig = json.loads((d / 'signals.json').read_text())
+        self.assertEqual([(x['n'], x.get('skipped')) for x in sig['items']], [(1, True)])
+        self.assertEqual(sig['no_draft'], 0)
+
 class ColdstartAsksUnlessYes1(unittest.TestCase):
     def test_yes0_still_asks_and_bad_days_rejected(self):
         env = cfg_env()

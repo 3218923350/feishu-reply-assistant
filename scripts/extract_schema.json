@@ -12,6 +12,6 @@
 "required":["type","title","content","people","projects","evidence","valid_from","volatility","confidence","why_useful"]}},
 "reviews":{"type":"array","items":{"type":"object","properties":{
 "n":{"type":"integer"},
-"reason":{"type":"string","enum":["查错或跑偏","他自己办了","口径不同","先反问","没听懂意图","只是改短","接着说别的"]},
+"reason":{"type":"string","enum":["判了不用回","查错或跑偏","他自己办了","口径不同","先反问","没听懂意图","只是改短","接着说别的"]},
 "note":{"type":"string"}},
 "required":["n","reason","note"]}}},"required":["memories"]}

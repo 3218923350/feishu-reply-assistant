@@ -97,12 +97,14 @@ const state = fs.existsSync(STATE_FILE)
 state.queue ||= []; // 待起草的消息，处理完才移除，重启后接着做
 state.threads ||= {}; // 助手发过消息、且要跟随回复的已知话题
 state.threadLookups ||= {}; // message_id -> { thread_id, at }，避免每轮重复查
+state.skipped ||= {}; // 判了「不用回」的：message_id -> { orig, summary, at }。之后我自己回了，记一条 manual-reply（不然判错的永远看不到）
 function saveState() {
   const now = Date.now();
   for (const [k, t] of Object.entries(state.seen)) if (now - t > 3 * 86400_000) delete state.seen[k];
   for (const [k, it] of Object.entries(state.items)) if (now - it.createdAt > 14 * 86400_000) delete state.items[k];
   for (const [k, t] of Object.entries(state.threads)) if (now - (t.created_at || 0) > THREAD_FOLLOW_MS) delete state.threads[k];
   for (const [k, t] of Object.entries(state.threadLookups)) if (now - (t?.at || 0) > 3 * 86400_000) delete state.threadLookups[k];
+  for (const [k, t] of Object.entries(state.skipped)) if (now - t.at > 86400_000) delete state.skipped[k];
   fs.writeFileSync(STATE_FILE + '.tmp', JSON.stringify(state, null, 1));
   fs.renameSync(STATE_FILE + '.tmp', STATE_FILE);
 }
@@ -154,8 +156,12 @@ const outcome = (id, item, what) => recordEvent('outcome', { card: id, orig: ite
 const alert = makeAlerter({ send: (md) => botSend(md), log }); // 每类一小时最多一次；授权过期不会被别的提醒吃掉
 
 // ---------- 收件箱 ----------
-const fmtMsg = (x) =>
-  `[${x.create_time}] ${x.sender?.name || x.sender?.id || '?'}${x.sender?.id === ME ? '(我)' : ''}: ${(x.content || '').replace(/\n/g, ' ⏎ ')}`;
+// quoted：引用的那条（reply_to → 消息）。引用了上下文外的老消息时，不写出来模型只会按顺序以为在接上一条（10-28 我引用了 10-26 少杰说 DeepSeek 的那句问进度，起草当成在问上一条的智谱）
+const fmtMsg = (x, quoted = {}) => {
+  const q = x.reply_to && quoted[x.reply_to];
+  return `[${x.create_time}] ${x.sender?.name || x.sender?.id || '?'}${x.sender?.id === ME ? '(我)' : ''}: ${(x.content || '').replace(/\n/g, ' ⏎ ')}`
+    + (q ? `\n    ↳ 引用 [${q.create_time}] ${q.sender?.name || q.sender?.id || '?'}${q.sender?.id === ME ? '(我)' : ''}: ${cut((q.content || '').replace(/\n/g, ' '), 200)}` : '');
+};
 
 // 助手发出的消息如果形成了飞书话题，记下 thread_id；之后只跟随这个已知话题里原收件人的回复
 async function registerThreadForMessage(messageId, info = {}, baselineAt = Date.now()) {
@@ -278,8 +284,15 @@ async function gatherContext(m) {
     const tmsgs = (t.messages || []).reverse().filter((x) => x.create_time <= m.create_time);
     if (tmsgs.length) { msgs = tmsgs; prefix = ['--- 话题内消息（当前话题） ---']; }
   }
+  // 引用：上下文里有的直接对上，没有的（引用了更早的消息）补查原文
+  const byId = Object.fromEntries(msgs.map((x) => [x.message_id, x]));
+  const missing = [...new Set(msgs.map((x) => x.reply_to).filter((id) => id && !byId[id]))].slice(0, 20);
+  if (missing.length) {
+    try { for (const x of (await lark(['im', '+messages-mget', '--as', 'user', '--message-ids', missing.join(','), '--no-reactions'])).messages || []) byId[x.message_id] = x; }
+    catch (e) { log('ERR quoted', e.message); }
+  }
   // 最后一条是这条消息本身（draftFor 取它前面几条当预取关键词）
-  return { text: [...prefix, ...msgs.map(fmtMsg)].join('\n'), msgs };
+  return { text: [...prefix, ...msgs.map((x) => fmtMsg(x, byId))].join('\n'), msgs };
 }
 
 // ---------- Claude ----------
@@ -737,7 +750,7 @@ async function draftFor(msgs, { force = false } = {}) {
   if (!force && skipAck(msgs, ctx.msgs, ME)) return log('skip', '纯确认', m.message_id);
   if (!force) react(m.message_id);
   const t0 = Date.now();
-  const recent = ctx.text.split('\n').slice(-4, -1).join(' '); // 当前消息之前的几条，关键词常在前文
+  const recent = ctx.msgs.slice(-4, -1).map((x) => fmtMsg(x)).join(' '); // 当前消息之前的几条，关键词常在前文
   const pre = await prefetch({ ...orig, recent }, { run, now: parseBJ(orig.create_time) + 60_000, bins: { mem: MEM, lark: LARK, orca: await launcherFor(run, ORCA) }, me: ME, ignore: [cfg.name], home: DIR }); // 只看这条消息之前我说过的
   log('prefetch', `${Date.now() - t0}ms 记忆 ${pre.memoryPaths.length} 条`);
   const prompt = `飞书上有一条需要处理的消息。
@@ -763,7 +776,11 @@ async function processBatch(msgs) {
   if (!todo.length) return log('skip', '已有草稿', msgs.at(-1).message_id);
   const d = await draftFor(todo);
   if (!d) return;
-  if (d.res.kind === 'skip') return log('skip', d.res.summary, d.orig.message_id);
+  if (d.res.kind === 'skip') {
+    state.skipped[d.orig.message_id] = { orig: d.orig, summary: d.res.summary || '', at: Date.now() };
+    saveState();
+    return log('skip', d.res.summary, d.orig.message_id);
+  }
   if (await alreadyReplied(todo.at(-1))) return log('skip', '处理期间已回复', d.orig.message_id);
   // 影子期：放手的话这条会怎么发（Claude 提议，硬规则只往严里改）
   const reasons = holds(d.res, { commands: sessionCommands(d.res.cwd, d.res.session), firstContact: d.firstContact,
@@ -784,7 +801,7 @@ async function closeHandled() {
   for (const [id, it] of Object.entries(state.items)) {
     if (it.status !== 'pending' || !it.orig || it.orig.chat_id === DRAFT_CHAT || Date.now() - it.createdAt > 3 * 86400_000) continue;
     let mine;
-    try { mine = handledBy(it.orig, await laterMessages(it.orig), ME, sent, minuteBJ(it.createdAt)); } catch (e) { log('ERR close', e.message); continue; }
+    try { mine = handledBy(it.orig, (await laterMessages(it.orig)).flat(), ME, sent, minuteBJ(it.createdAt)); } catch (e) { log('ERR close', e.message); continue; }
     if (!mine.length || it.status !== 'pending') continue; // 查的时候我可能刚在卡下说了话
     it.status = 'handled';
     n++;
@@ -795,6 +812,16 @@ async function closeHandled() {
     if (it.ui) { refreshCard(id, `你回的：${cut(mine[0].content, 120)}`); continue; }
     lark(['im', 'reactions', 'create', '--as', 'bot', '--params', JSON.stringify({ message_id: id }), '--data', JSON.stringify({ reaction_type: { emoji_type: 'DONE' } })], true)
       .catch((e) => log('ERR react', e.message));
+  }
+  // 判了「不用回」、我却自己回了：判错了，记下来进日报（只看一天内的；同一个人后来又出了卡的，回的算那张卡的）
+  for (const [id, sk] of Object.entries(state.skipped)) {
+    let mine;
+    try { mine = handledBy(sk.orig, (await laterMessages(sk.orig)).flat(), ME, sent, minuteBJ(sk.at)); } catch (e) { log('ERR close', e.message); continue; }
+    if (!mine.length) continue;
+    delete state.skipped[id];
+    n++;
+    const own = ownReplies({ orig: sk.orig }, state.items, mine);
+    if (own.length) recordEvent('manual-reply', { orig: sk.orig, draft: '', skipped: sk.summary, actual: own.slice(0, 3).map((x) => x.content) });
   }
   if (n) { saveState(); log('handled', `${n} 张卡已在原会话回过，收起`); }
 }

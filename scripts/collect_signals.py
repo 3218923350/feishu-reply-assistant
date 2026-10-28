@@ -18,9 +18,12 @@ def render(events, recalled, name):
     for e in events:
         o = e.get('orig') or {}
         if e.get('kind') == 'manual-reply' and e.get('actual'):
-            draft = e.get('draft') or ''
-            if draft: items.append({'n': len(items) + 1, 'card': e.get('card'), 'sender': o.get('sender_name', '?'), 'chat': o.get('chat_name') or '私聊', 'draft': draft, 'actual': e['actual']})
-            parts.append(f"### {f'#{len(items)} ' if draft else ''}{o.get('sender_name', '?')}（{o.get('chat_name') or '私聊'}）\n原消息：{o.get('content', '')[:500]}\n助手草稿：{draft or '（没有草稿）'}\n{name}实际回的：{' ⏎ '.join(e['actual'])}")
+            # skipped：助手判了「不用回」（没出卡），{name}却回了。也要归类：多半是判错了
+            draft, skipped = e.get('draft') or '', e.get('skipped')
+            ask = bool(draft) or skipped is not None
+            if ask: items.append({'n': len(items) + 1, 'card': e.get('card'), 'sender': o.get('sender_name', '?'), 'chat': o.get('chat_name') or '私聊', 'draft': draft or f'（判了不用回：{skipped}）', 'actual': e['actual'], **({'skipped': True} if skipped is not None else {})})
+            got = f'（判了不用回，没出卡：{skipped}）' if skipped is not None else draft or '（没有草稿）'
+            parts.append(f"### {f'#{len(items)} ' if ask else ''}{o.get('sender_name', '?')}（{o.get('chat_name') or '私聊'}）\n原消息：{o.get('content', '')[:500]}\n助手草稿：{got}\n{name}实际回的：{' ⏎ '.join(e['actual'])}")
         elif e.get('kind') in SENT and e.get('message_id') in recalled:
             parts.append(f"### {name}撤回了助手替他发给{e.get('toName') or o.get('sender_name', '?')}的这条\n{e.get('text', '')}")
     if not parts: return '', items
@@ -43,7 +46,7 @@ def main(d, day):
     if md:
         (d / 'batches').mkdir(exist_ok=True); (d / 'batches' / 'zz-signals.md').write_text(md)
     mr = [e for e in events if e.get('kind') == 'manual-reply']
-    (d / 'signals.json').write_text(json.dumps({'day': day, 'items': items, 'no_draft': sum(bool(e.get('actual')) and not e.get('draft') for e in mr),
+    (d / 'signals.json').write_text(json.dumps({'day': day, 'items': items, 'no_draft': sum(bool(e.get('actual')) and not e.get('draft') and e.get('skipped') is None for e in mr),
                                                 'unpaired': sum(not e.get('actual') for e in mr)}, ensure_ascii=False, indent=1))
     print('草稿 vs 实发', len(mr), '条，有内容' if md else '，没有')
 
