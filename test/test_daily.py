@@ -64,11 +64,12 @@ class Signals(unittest.TestCase):
                {'ts': '2026-10-21T15:00:00Z', 'kind': 'manual-reply', 'orig': {'sender_name': '前一天'}, 'draft': 'x', 'actual': ['y']}]
         day = of_day(evs, '2026-10-22')  # 北京时间：10-21T15:00Z 是 10-21 23:00，不算
         self.assertEqual(len(day), 3)
-        md = render(day, {'om_r'}, '张三')
+        md, items = render(day, {'om_r'}, '张三')
         self.assertIn('吴九', md); self.assertIn('收到，谢谢！', md); self.assertIn('那我合到账单里', md)
         self.assertIn('撤回', md); self.assertIn('模型 A 那批今天不上', md); self.assertNotIn('我们加一下', md)
         self.assertIn('张三实际回的', md)
-        self.assertEqual(render([], set(), '张三'), '')
+        self.assertEqual([x['sender'] for x in items], ['吴九'])
+        self.assertEqual(render([], set(), '张三'), ('', []))
 
 class CloseOpen(unittest.TestCase):
     def test_only_known_open_items_become_done(self):

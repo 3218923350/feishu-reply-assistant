@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { prefetch } from './lib/prefetch.mjs';
-import { burstKey, handledBy, myReplies, nextBatches, settle, shouldDraft, skipAck, watchedThreadReply } from './lib/inbox.mjs';
+import { burstKey, handledBy, myReplies, nextBatches, ownReplies, settle, shouldDraft, skipAck, watchedThreadReply } from './lib/inbox.mjs';
 import { DRAFT_PERMS, EXEC_DENY } from './lib/tools.mjs';
 import { parseReview } from './lib/review.mjs';
 import { apiError, approvePrompt, chunk, claim, isExternalDenied, isVerified, manualNotice, owner, retryPrompt, route, threadReplies, wakePrompt, workPrompt } from './lib/commands.mjs';
@@ -788,7 +788,9 @@ async function closeHandled() {
     if (!mine.length || it.status !== 'pending') continue; // 查的时候我可能刚在卡下说了话
     it.status = 'handled';
     n++;
-    recordEvent('manual-reply', { card: id, orig: it.orig, draft: it.draft || '', actual: mine.slice(0, 3).map((x) => x.content) }); // 私聊里之后我说的都算，只留最先的几条
+    // 私聊里之后我说的都算，只留最先的几条；他后来又出了新卡、我回的是新卡的：actual 空、later 标上（复盘时跳过）
+    const own = ownReplies(it, state.items, mine);
+    recordEvent('manual-reply', { card: id, orig: it.orig, draft: it.draft || '', actual: own.slice(0, 3).map((x) => x.content), ...(own.length ? {} : { later: true }) });
     outcome(id, it, 'self');
     if (it.ui) { refreshCard(id, `你回的：${cut(mine[0].content, 120)}`); continue; }
     lark(['im', 'reactions', 'create', '--as', 'bot', '--params', JSON.stringify({ message_id: id }), '--data', JSON.stringify({ reaction_type: { emoji_type: 'DONE' } })], true)

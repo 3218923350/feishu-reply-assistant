@@ -89,7 +89,7 @@ test('shouldDraft：连发合并起草过的消息（burst 里的）也不再起
   assert.equal(shouldDraft(m, state), false);
 });
 
-import { handledBy } from '../lib/inbox.mjs';
+import { handledBy, ownReplies } from '../lib/inbox.mjs';
 test('handledBy：卡片发出后我在原会话亲自回的才算；助手替我发的、卡片之前的不算', () => {
   const orig = { message_id: 'om_q', chat_type: 'p2p', create_time: '2026-10-23 11:34', sender_id: 'ou_u1' };
   const msgs = [mine({ message_id: 'om_old', create_time: '2026-10-23 11:35' }), mine({ message_id: 'om_fr', create_time: '2026-10-23 11:56' }),
@@ -101,6 +101,17 @@ test('handledBy：卡片发出后我在原会话亲自回的才算；助手替�
   // 群里：orig 只有 sender_id，也能按「@ 了发送人」认
   const g = { ...orig, chat_type: 'group' };
   assert.deepEqual(handledBy(g, [mine({ message_id: 'om_at', create_time: '2026-10-23 11:58', mentions: [{ id: 'ou_u1' }] })], ME, new Set(), '2026-10-23 11:37').map((x) => x.message_id), ['om_at']);
+});
+
+// 10-23 私聊：同一个同事连着问了 4 件事（4 张卡），我之后回的一句被记到了 4 张卡上，「草稿 vs 我实际怎么回的」配错了
+test('ownReplies：我回的话只算给它前面最近的那张卡；别的会话、别的人的卡不影响', () => {
+  const card = (id, t, o = {}) => ({ orig: { message_id: id, chat_id: 'oc_p', chat_type: 'p2p', sender_id: 'ou_u1', create_time: t, ...o } });
+  const items = { a: card('om_a', '2026-10-23 14:00'), b: card('om_b', '2026-10-23 14:05'), c: card('om_c', '2026-10-23 14:30'),
+    other: card('om_x', '2026-10-23 14:01', { sender_id: 'ou_u2' }), thread: card('om_t', '2026-10-23 14:02', { thread_id: 'omt_1' }) };
+  const r1 = mine({ message_id: 'om_r1', create_time: '2026-10-23 14:03' }), r2 = mine({ message_id: 'om_r2', create_time: '2026-10-23 14:40' });
+  assert.deepEqual(ownReplies(items.a, items, [r1, r2]).map((x) => x.message_id), ['om_r1']); // 别人的卡、话题里的卡不算「下一张」
+  assert.deepEqual(ownReplies(items.b, items, [r2]).map((x) => x.message_id), []); // 14:40 那句是回 c 的
+  assert.deepEqual(ownReplies(items.c, items, [r2]).map((x) => x.message_id), ['om_r2']);
 });
 
 // 2026-10-23 18:41 秦十在部署卡话题里先「@孙七 帮忙点一下谢谢」再单独「@张三」：只 @ 我是在叫我，不是「好的」
