@@ -88,10 +88,11 @@ doctor 检查的项：系统是 macOS、Node ≥ 24、Claude Code、lark-cli、g
 | `desktop_send` | 否 | `true`：外部群网页版没发成时，操作本机已登录的飞书桌面客户端替你发：先跑脚本（`lib/feishu-desktop.swift`，十几秒），不行再让 Codex（`codex exec`）看着界面发。要「辅助功能」权限，助手放进 Orca 终端里跑；发完去会话里核对。默认 `false` |
 | `desktop_model` | 否 | 桌面代发兜底时 Codex 用的模型（比如 `deepseek-v4.1-flash-1017`，要你的 Codex 接得到）；不写用 Codex 自己的默认 |
 | `task_list_id` | 否 | 「加入任务」建的飞书任务放进哪个任务清单（清单链接里 `guid=` 后面那串）；不写就只指给你 |
+| `claude_settings` | 否 | 换底层模型（比如 DeepSeek）：一份 Claude Code settings 文件的路径，起草、办事、抽记忆、复盘都用它。模板 `templates/claude-settings.example.json`，说明见 docs/MODELS.md；改完重跑 `./install.sh` |
 | `task_agent` | 否 | 任务卡「开工」在 Orca 里起哪个 agent，默认 `claude`（也可以 `codex` 等 Orca 认识的） |
 | `ack_after_minutes` | 否 | 开了 `auto_send` 时，私聊里查了多少分钟还没完就先回一句，默认 `5`；`0` 不先回 |
 | `ack_text` | 否 | 先回的那句，默认「收到，我看一下」（结尾照样带署名） |
-| `draft_timeout_minutes` | 否 | 起草最多查多少分钟，到点用已查到的收尾，默认 `40` |
+| `draft_timeout_minutes` | 否 | 起草最多查多少分钟，到点用已查到的收尾，默认 `15` |
 | `max_turns` | 否 | 起草最多几轮工具调用，不写不限（查清楚再交）；环境变量 `FRA_MAX_TURNS` 优先 |
 | `max_parallel` | 否 | 同时起草几条，默认 `4` |
 | `group_reply_in_thread` | 否 | 群里的回复开话题，默认 `true`；`false` 用引用回复（原消息本来在话题里的照样回进话题） |
@@ -129,7 +130,7 @@ mem review                        # 列出待确认的记忆
 
 ## 费用
 
-起草、办事、抽记忆都用你本机 Claude Code 的账号。每次调用都记成事件，记忆日报里有一行「过去 24 小时花费」（在 Orca 终端里办的事拿不到费用，记为未知）。起草不限轮数（要限就设环境变量 `FRA_MAX_TURNS`），查到 40 分钟还没完就用已查到的收尾；同时最多 4 条在起草。
+起草、办事、抽记忆都用你本机 Claude Code 的账号。每次调用都记成事件，记忆日报里有一行「过去 24 小时花费」（在 Orca 终端里办的事拿不到费用，记为未知）。起草不限轮数（要限就在配置里写 `max_turns`），查到 15 分钟（`draft_timeout_minutes`）还没完就用已查到的收尾；同时最多 4 条在起草（`max_parallel`）。换便宜的底层模型见 docs/MODELS.md。
 
 ## 安全
 

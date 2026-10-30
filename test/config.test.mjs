@@ -163,7 +163,7 @@ test('loadConfig：这一版新加的可调项，不写有默认值，写错给�
   const a = fixture({ ...MIN });
   const c = loadConfig({ env: { FRA_HOME: a.fra }, home: a.home });
   assert.deepEqual([c.taskAgent, c.ackAfterMs, c.ackText, c.draftTimeoutMs, c.maxTurns, c.maxParallel, c.groupReplyInThread, c.followThreadMs, c.dailyReview],
-    ['claude', 5 * 60_000, '收到，我看一下', 40 * 60_000, null, 4, true, 6 * 3600_000, true]);
+    ['claude', 5 * 60_000, '收到，我看一下', 15 * 60_000, null, 4, true, 6 * 3600_000, true]);
   const b = fixture({ ...MIN, ack_after_minutes: 0, follow_thread_hours: 0, group_reply_in_thread: false, max_turns: 20, task_agent: 'codex', daily_review: false });
   const d = loadConfig({ env: { FRA_HOME: b.fra }, home: b.home });
   assert.deepEqual([d.ackAfterMs, d.followThreadMs, d.groupReplyInThread, d.maxTurns, d.taskAgent, d.dailyReview], [0, 0, false, 20, 'codex', false]);
@@ -174,4 +174,15 @@ test('loadConfig：这一版新加的可调项，不写有默认值，写错给�
     const bad = fixture({ ...MIN, [k]: v });
     assert.throws(() => loadConfig({ env: { FRA_HOME: bad.fra }, home: bad.home }), new RegExp(k));
   }
+});
+
+test('loadConfig：claude_settings 按 FRA_HOME 解析成绝对路径，不写是 null', () => {
+  const a = fixture({ ...MIN });
+  assert.equal(loadConfig({ env: { FRA_HOME: a.fra }, home: a.home }).claudeSettings, null);
+  const b = fixture({ ...MIN, claude_settings: 'claude-settings.json' });
+  assert.equal(loadConfig({ env: { FRA_HOME: b.fra }, home: b.home }).claudeSettings, path.join(b.fra, 'claude-settings.json'));
+  const c = fixture({ ...MIN, claude_settings: '~/x.json' });
+  assert.equal(loadConfig({ env: { FRA_HOME: c.fra }, home: c.home }).claudeSettings, path.join(c.home, 'x.json'));
+  const bad = fixture({ ...MIN, claude_settings: 1 });
+  assert.throws(() => loadConfig({ env: { FRA_HOME: bad.fra }, home: bad.home }), /claude_settings/);
 });

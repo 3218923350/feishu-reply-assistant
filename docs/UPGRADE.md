@@ -83,7 +83,8 @@ lark-cli auth login --domain task      # 用户身份加 task:task:write
 | 键 | 默认 | 说明 |
 |---|---|---|
 | `max_turns` | 不限 | 起草最多几轮工具调用 |
-| `draft_timeout_minutes` | 40 | 起草最多查多久，到点用已查到的收尾 |
+| `draft_timeout_minutes` | 15 | 起草最多查多久，到点用已查到的收尾 |
+| `claude_settings` | 无 | 换底层模型（比如 DeepSeek），见 [MODELS.md](MODELS.md) |
 | `max_parallel` | 4 | 同时起草几条 |
 | `daily_review` | true | 每天的复盘 |
 

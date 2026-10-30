@@ -1,0 +1,16 @@
+{
+  "//": "复制成你自己的文件（比如 ~/.feishu-reply-assistant/claude-settings.json，权限设成 600：里面有 key），再在 config.json 里写 \"claude_settings\": \"<这个文件的路径>\"，重跑 ./install.sh。说明见 docs/MODELS.md。以 // 开头的键 Claude Code 不认，可以删掉",
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://<兼容 Anthropic Messages 协议的网关地址>",
+    "ANTHROPIC_AUTH_TOKEN": "<你的 key>",
+    "ANTHROPIC_MODEL": "claude-opus-4-8[1m]",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-4-8[1m]",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-opus-4-8[1m]",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-opus-4-8[1m]",
+    "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "64000"
+  },
+  "//modelOverrides": "Claude Code 按它认识的模型名定上下文和输出上限；直接写 deepseek-xxx 会被当成未知模型按小窗口处理。所以对内用一个 1M 上下文的 Claude 模型名，再用 modelOverrides 把真正发出去的模型名换成你网关上的",
+  "modelOverrides": {
+    "claude-opus-4-8": "<网关上的模型名，比如 deepseek-v4.1-flash>"
+  }
+}

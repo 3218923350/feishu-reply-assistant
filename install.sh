@@ -12,6 +12,17 @@ ENVS="<key>PATH</key><string>$(x "$DIR/bin:$PATH")</string>
     <key>HOME</key><string>$(x "$HOME")</string>
     <key>FRA_HOME</key><string>$(x "$FRA_HOME")</string>
     <key>LANG</key><string>zh_CN.UTF-8</string>"
+# 配置里有 claude_settings（换底层模型，见 docs/MODELS.md）：生成一个带 --settings 的 claude 包装，起草、办事、抽记忆、复盘都走它
+SETTINGS=$(FRA_REPO="$DIR" "$NODE" --input-type=module -e "const { loadConfig } = await import(process.env.FRA_REPO + '/lib/config.mjs'); console.log(loadConfig().claudeSettings || '')") || exit 1
+if [ -n "$SETTINGS" ]; then
+  [ -f "$SETTINGS" ] || { echo "claude_settings 指的文件不存在：$SETTINGS" >&2; exit 1; }
+  CLAUDE_REAL=$(type -P claude) || { echo "找不到 claude（Claude Code）" >&2; exit 1; }
+  printf '#!/bin/sh\n# install.sh 按配置里的 claude_settings 生成，别手改\nexec %q --settings %q "$@"\n' "$CLAUDE_REAL" "$SETTINGS" > "$FRA_HOME/claude"
+  chmod +x "$FRA_HOME/claude"
+  ENVS="$ENVS
+    <key>FRA_CLAUDE</key><string>$(x "$FRA_HOME/claude")</string>"
+  echo "底层模型按 $SETTINGS 跑（$FRA_HOME/claude）"
+fi
 
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 cat > "$PLIST" <<EOF1
