@@ -387,7 +387,7 @@ async function postDraft(item, res, replyTo) {
 // 卡怎么画存在 item.view 里：拦承诺时要带着警告原样重画
 function renderView(view, { draft, warning = [], pending = [] } = {}) {
   if (view.type === 'report') return reportCard(view.orig, { ...view.rep, ...(draft != null ? { draft } : {}) }, view.receipts, view.session, { warning, pending, log: view.log, watch: reportWatch(view) });
-  return draftCard(view.orig || view.res.orig, { ...view.res, ...(draft != null ? { draft } : {}) }, view.shadow, { warning });
+  return draftCard(view.orig || view.res.orig, { ...view.res, ...(draft != null ? { draft } : {}) }, view.shadow, { warning, live: cfg.autoSend });
 }
 const origKey = (o) => burstKey({ chat_id: o.chat_id, sender: { id: o.sender_id }, thread_id: o.thread_id });
 
