@@ -95,7 +95,7 @@ function postCopy(text, files) {
 }
 
 function sendArgs(t, extra) {
-  if (t.kind === 'orig') return ['im', '+messages-reply', '--as', 'user', '--message-id', t.id, ...(ctx.orig.thread_id ? ['--reply-in-thread'] : []), ...extra];
+  if (t.kind === 'orig') return ['im', '+messages-reply', '--as', 'user', '--message-id', t.id, ...(ctx.orig.chat_type !== 'p2p' ? ['--reply-in-thread'] : []), ...extra];
   return ['im', '+messages-send', '--as', 'user', t.kind === 'user' ? '--user-id' : '--chat-id', t.id, ...extra];
 }
 
@@ -141,7 +141,8 @@ if (cmd === 'send') {
     die(3, `${t.name} 是外部会话，飞书不允许以${NAME}身份发（230027），代发也没成（${web.why}）。原文和附件已贴在卡片下面（也放了剪贴板），报告里写明「没发出」`);
   }
   if (!r.ok) die(1, `发送失败：${JSON.stringify(r.error).slice(0, 300)}`);
-  event({ kind: 'fr-sent', ...base, message_id: r.data?.message_id, chat_id: r.data?.chat_id });
+  // 回原消息的带上原消息：助手据此跟随这条开出来的话题（发给别人的不跟）
+  event({ kind: 'fr-sent', ...base, message_id: r.data?.message_id, chat_id: r.data?.chat_id, ...(t.kind === 'orig' ? { orig: ctx.orig } : {}) });
   for (const f of opts.file) {
     const fr2 = lark(sendArgs(t, ['--file', path.basename(f)]), path.dirname(path.resolve(f)));
     if (fr2.ok) event({ kind: 'fr-sent', key: dedupKey(ctx.card, t.id, f), to: t.id, toName: t.name, text: `📎 ${path.basename(f)}`, message_id: fr2.data?.message_id });

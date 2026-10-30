@@ -10,7 +10,7 @@ const NODE = process.execPath;
 
 // 假 lark-cli：按参数返回固定结果，并把每次调用记到 calls.log
 const CONFIG = { name: '张三', open_id: 'ou_me', draft_chat_id: 'oc_draft', messenger_url: 'https://example.feishu.cn/next/messenger/', secret_prefixes: ['abc'] };
-function setup({ external = false, web = 'off', thread = 'omt_1', authText = '可以直接发 然后找一下赵六吧 等他改好了 我们复测没问题再回复一遍', ctxOver = {}, config = CONFIG, tabs = true, desktop = null } = {}) {
+function setup({ external = false, web = 'off', thread = 'omt_1', authText = '可以直接发 然后找一下赵六吧 等他改好了 我们复测没问题再回复一遍', ctxOver = {}, origOver = {}, config = CONFIG, tabs = true, desktop = null } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fr-'));
   if (config) fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify(config));
   const lark = path.join(dir, 'lark');
@@ -41,7 +41,7 @@ esac
 `, { mode: 0o755 });
   const ctx = path.join(dir, 'ctx.json');
   fs.writeFileSync(ctx, JSON.stringify({ card: 'om_card', session: 's1', cwd: '/w', authText,
-    orig: { message_id: 'om_orig', chat_id: 'oc_proj', chat_name: '某项目群', thread_id: thread, sender_id: 'ou_u4', sender_name: '冯五', chat_type: 'group' }, ...ctxOver }));
+    orig: { message_id: 'om_orig', chat_id: 'oc_proj', chat_name: '某项目群', thread_id: thread, sender_id: 'ou_u4', sender_name: '冯五', chat_type: 'group', ...origOver }, ...ctxOver }));
   // 假的桌面脚本：state 说有权限（直接跑，不开 Orca 终端），open / send 都说不行，逼到 Codex 那一步
   const helper = path.join(dir, 'helper');
   fs.writeFileSync(helper, `#!/bin/bash
@@ -69,6 +69,22 @@ test('回原消息：话题里回，记回执', () => {
   assert.match(s.calls(), /\+messages-reply .*--message-id om_orig .*--reply-in-thread/);
   const e = s.events().find((x) => x.kind === 'fr-sent');
   assert.deepEqual([e.card, e.toName, e.text], ['om_card', '冯五', '不是 504']);
+  assert.deepEqual([e.orig.message_id, e.orig.sender_id, e.orig.chat_type], ['om_orig', 'ou_u4', 'group']); // 助手据此跟随话题
+});
+
+test('发给点了名的人：回执不带原消息（不跟随那边的话题）', () => {
+  const s = setup();
+  assert.equal(s.fr('send', '--to', '赵六', '--text', '麻烦看下 WAF', '--why', '找一下赵六').status, 0);
+  assert.equal(s.events().find((x) => x.kind === 'fr-sent').orig, undefined);
+});
+
+test('群消息即使原来不在话题，也开话题回复；私聊继续走主消息流', () => {
+  const g = setup({ thread: null });
+  assert.equal(g.fr('send', '--to', 'orig', '--text', '群里回', '--why', '可以直接发').status, 0);
+  assert.match(g.calls(), /\+messages-reply .*--reply-in-thread/);
+  const p = setup({ thread: null, origOver: { chat_type: 'p2p' } });
+  assert.equal(p.fr('send', '--to', 'orig', '--text', '私聊回', '--why', '可以直接发').status, 0);
+  assert.doesNotMatch(p.calls(), /--reply-in-thread/);
 });
 
 test('点了名的人可以发；没点名的人拒发且不调用发送', () => {

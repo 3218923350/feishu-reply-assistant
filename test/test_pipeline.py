@@ -142,6 +142,34 @@ class SignalsSkipBadLines(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn('李四', (d / 'batches' / 'zz-signals.md').read_text())
 
+    def test_numbered_items_and_unpaired(self):
+        """有草稿的编号（抽取时据此归类）；actual 空的（回的是同一个人后来那张卡）不进 md、只计数；没草稿的不编号"""
+        env = cfg_env()
+        ev = Path(env['FRA_HOME']) / 'events'; ev.mkdir()
+        e = lambda who, draft, actual: json.dumps({'ts': '2026-10-22T04:00:00Z', 'kind': 'manual-reply', 'card': f'om_{who}', 'orig': {'sender_name': who}, 'draft': draft, 'actual': actual}, ensure_ascii=False)
+        (ev / '2026-10.jsonl').write_text('\n'.join([e('李四', '稿一', ['回一']), e('王五', '', ['回二']), e('赵六', '稿三', []), e('孙七', '稿四', ['回四'])]) + '\n')
+        d = Path(tempfile.mkdtemp())
+        r = subprocess.run([sys.executable, str(HERE / 'collect_signals.py'), str(d), '2026-10-22'], capture_output=True, text=True, env={**env, 'FRA_LARK': '/usr/bin/false'})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        md = (d / 'batches' / 'zz-signals.md').read_text()
+        self.assertIn('### #1 李四', md); self.assertIn('### 王五', md); self.assertIn('### #2 孙七', md); self.assertNotIn('赵六', md)
+        sig = json.loads((d / 'signals.json').read_text())
+        self.assertEqual([(x['n'], x['sender'], x['card']) for x in sig['items']], [(1, '李四', 'om_李四'), (2, '孙七', 'om_孙七')])
+        self.assertEqual((sig['no_draft'], sig['unpaired']), (1, 1))
+
+    def test_skipped_but_replied_is_numbered(self):
+        """助手判了不用回（没出卡）、他却回了：也编号归类，草稿写明判了不用回；不算「没草稿」"""
+        env = cfg_env()
+        ev = Path(env['FRA_HOME']) / 'events'; ev.mkdir()
+        e = {'ts': '2026-10-22T04:00:00Z', 'kind': 'manual-reply', 'orig': {'sender_name': '李四', 'chat_name': '对接群', 'content': '加完了 您这边看一下'}, 'draft': '', 'skipped': '李四说加完了，不用回', 'actual': ['看了，到账了']}
+        (ev / '2026-10.jsonl').write_text(json.dumps(e, ensure_ascii=False) + '\n')
+        d = Path(tempfile.mkdtemp())
+        subprocess.run([sys.executable, str(HERE / 'collect_signals.py'), str(d), '2026-10-22'], check=True, capture_output=True, env={**env, 'FRA_LARK': '/usr/bin/false'})
+        self.assertIn('### #1 李四（对接群）\n原消息：加完了 您这边看一下\n助手草稿：（判了不用回，没出卡：李四说加完了，不用回）', (d / 'batches' / 'zz-signals.md').read_text())
+        sig = json.loads((d / 'signals.json').read_text())
+        self.assertEqual([(x['n'], x.get('skipped')) for x in sig['items']], [(1, True)])
+        self.assertEqual(sig['no_draft'], 0)
+
 class ColdstartAsksUnlessYes1(unittest.TestCase):
     def test_yes0_still_asks_and_bad_days_rejected(self):
         env = cfg_env()

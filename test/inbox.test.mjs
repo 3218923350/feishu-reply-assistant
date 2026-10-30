@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { repliedTo, shouldDraft } from '../lib/inbox.mjs';
+import { repliedTo, shouldDraft, watchedThreadReply } from '../lib/inbox.mjs';
 
 const ME = 'ou_me';
 const m = { message_id: 'om_q', chat_type: 'group', create_time: '2026-10-22 21:20', sender: { id: 'ou_u10' }, thread_id: null };
@@ -22,9 +22,33 @@ test('别人的消息、或比这条早的我的消息 → 不算', () => {
   assert.equal(repliedTo(m, [{ ...mine({ reply_to: 'om_q' }), sender: { id: 'ou_x' } }], ME), false);
   assert.equal(repliedTo(m, [mine({ reply_to: 'om_q', create_time: '2026-10-22 21:19' })], ME), false);
 });
-test('私聊里我之后说过话 → 已回复', () => {
+test('私聊主消息流里我之后说过话 → 已回复', () => {
   assert.equal(repliedTo({ ...m, chat_type: 'p2p' }, [mine({})], ME), true);
 });
+test('私聊话题里别把另一个话题的回复算成已回复；同话题或引用才算', () => {
+  const q = { ...m, chat_type: 'p2p', thread_id: 'omt_a' };
+  assert.equal(repliedTo(q, [mine({ thread_id: 'omt_b' })], ME), false);
+  assert.equal(repliedTo(q, [mine({ thread_id: 'omt_a' })], ME), true);
+  assert.equal(repliedTo(q, [mine({ reply_to: 'om_q' })], ME), true);
+});
+// PR #1 review：话题里我 12:27 回了他，他 12:27 又接了一句——时间只到分，以前会把我那句当成回了他这句，这句就漏了
+test('同一分钟里我先说、他后说：不算回过他这句（按倒序列表里的先后判断）', () => {
+  const q = { ...m, message_id: 'om_his', thread_id: 'omt_a', create_time: '2026-10-27 12:27' };
+  const my = mine({ message_id: 'om_my', thread_id: 'omt_a', create_time: '2026-10-27 12:27' });
+  assert.equal(repliedTo(q, [q, my], ME, [[q, my]]), false); // 倒序：他在前（新）、我在后（早）
+  assert.equal(repliedTo(q, [my, q], ME, [[my, q]]), true); // 倒序：我在前 = 我后说，算回过
+  assert.equal(repliedTo(q, [q, my], ME), true); // 不给列表顺序：照旧按分钟算（同一分钟算回过）
+});
+test('已知话题自动跟随：只认原收件人的新回复，不认其他人和自己', () => {
+  const t = { thread_id: 'omt_a', root_message_id: 'om_root', watch_sender_id: 'ou_u10' };
+  const reply = { message_id: 'om_new', sender: { id: 'ou_u10', sender_type: 'user' } };
+  assert.equal(watchedThreadReply(reply, t, {}, ME), true);
+  assert.equal(watchedThreadReply({ ...reply, sender: { id: 'ou_other', sender_type: 'user' } }, t, {}, ME), false);
+  assert.equal(watchedThreadReply({ ...reply, sender: { id: ME, sender_type: 'user' } }, t, {}, ME), false);
+  assert.equal(watchedThreadReply({ ...reply, message_id: 'om_root' }, t, {}, ME), false);
+  assert.equal(watchedThreadReply(reply, t, { om_new: 1 }, ME), false);
+});
+
 test('shouldDraft：已有这条消息的草稿 → 不再起草', () => {
   const state = { items: { om_card: { orig: { message_id: 'om_q' } } } };
   assert.equal(shouldDraft(m, state), false);
@@ -65,7 +89,7 @@ test('shouldDraft：连发合并起草过的消息（burst 里的）也不再起
   assert.equal(shouldDraft(m, state), false);
 });
 
-import { handledBy } from '../lib/inbox.mjs';
+import { handledBy, ownReplies } from '../lib/inbox.mjs';
 test('handledBy：卡片发出后我在原会话亲自回的才算；助手替我发的、卡片之前的不算', () => {
   const orig = { message_id: 'om_q', chat_type: 'p2p', create_time: '2026-10-23 11:34', sender_id: 'ou_u1' };
   const msgs = [mine({ message_id: 'om_old', create_time: '2026-10-23 11:35' }), mine({ message_id: 'om_fr', create_time: '2026-10-23 11:56' }),
@@ -77,6 +101,17 @@ test('handledBy：卡片发出后我在原会话亲自回的才算；助手替�
   // 群里：orig 只有 sender_id，也能按「@ 了发送人」认
   const g = { ...orig, chat_type: 'group' };
   assert.deepEqual(handledBy(g, [mine({ message_id: 'om_at', create_time: '2026-10-23 11:58', mentions: [{ id: 'ou_u1' }] })], ME, new Set(), '2026-10-23 11:37').map((x) => x.message_id), ['om_at']);
+});
+
+// 10-23 私聊：同一个同事连着问了 4 件事（4 张卡），我之后回的一句被记到了 4 张卡上，「草稿 vs 我实际怎么回的」配错了
+test('ownReplies：我回的话只算给它前面最近的那张卡；别的会话、别的人的卡不影响', () => {
+  const card = (id, t, o = {}) => ({ orig: { message_id: id, chat_id: 'oc_p', chat_type: 'p2p', sender_id: 'ou_u1', create_time: t, ...o } });
+  const items = { a: card('om_a', '2026-10-23 14:00'), b: card('om_b', '2026-10-23 14:05'), c: card('om_c', '2026-10-23 14:30'),
+    other: card('om_x', '2026-10-23 14:01', { sender_id: 'ou_u2' }), thread: card('om_t', '2026-10-23 14:02', { thread_id: 'omt_1' }) };
+  const r1 = mine({ message_id: 'om_r1', create_time: '2026-10-23 14:03' }), r2 = mine({ message_id: 'om_r2', create_time: '2026-10-23 14:40' });
+  assert.deepEqual(ownReplies(items.a, items, [r1, r2]).map((x) => x.message_id), ['om_r1']); // 别人的卡、话题里的卡不算「下一张」
+  assert.deepEqual(ownReplies(items.b, items, [r2]).map((x) => x.message_id), []); // 14:40 那句是回 c 的
+  assert.deepEqual(ownReplies(items.c, items, [r2]).map((x) => x.message_id), ['om_r2']);
 });
 
 // 2026-10-23 18:41 秦十在部署卡话题里先「@孙七 帮忙点一下谢谢」再单独「@张三」：只 @ 我是在叫我，不是「好的」

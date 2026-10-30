@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { costFromStream, shq, workLaunch } from '../lib/work.mjs';
+import { costFromStream, lastTalkAt, shq, staleWork, workLaunch, workProcs } from '../lib/work.mjs';
+import { EXEC_DENY } from '../lib/tools.mjs';
 import { launcherFor, orcaBin } from '../lib/orca.mjs';
 
 const base = { repo: '/tmp/a b/repo', where: '/tmp/a b/repo', cwd: '/tmp/a b/repo/workspace', session: 's1', promptFile: '/tmp/a b/p.md',
@@ -86,4 +87,39 @@ test('workLaunch：Orca 终端里带上 FRA_HOME（Orca 自己的环境里没有
   const l = workLaunch({ ...base, orca: '/x/orca', home: '/tmp/a b/fra' });
   assert.ok(l.args[l.args.indexOf('--command') + 1].includes(`FRA_HOME='/tmp/a b/fra'`));
   assert.equal(workLaunch({ ...base, orca: null, home: '/tmp/a b/fra' }).env.FRA_HOME, '/tmp/a b/fra');
+});
+
+// 10-27：Orca 里的办事 claude 办完不退，漏了 32 个、约 8.6GB；回收只认助手自己起的进程
+const S1 = '11111111-2222-3333-4444-555555555555', S2 = '66666666-7777-8888-9999-000000000000';
+const argv = (sid, deny = EXEC_DENY) => `/opt/bin/claude --resume ${sid} --dangerously-skip-permissions --disallowedTools ${deny.join(' ')} -- 去办`;
+test('workProcs：只认 claude --resume <会话> + 完整的 EXEC_DENY；我自己开的 claude、别家 harness 带着这串字样的都不认', () => {
+  const ps = [
+    ` 101 ${argv(S1)}`,
+    ` 102 claude --resume ${S2} --dangerously-skip-permissions`, // 我自己 --resume 的
+    ` 103 /opt/bin/claude --output-format stream-json --resume=${S2}`, // Orca 聊天
+    ` 104 node /x/dsh --prompt "找带 --disallowedTools Bash(lark-cli im +messages-send:*) 的 claude --resume ${S1}"`, // 别家 harness 的题目原文
+    ` 105 ${argv(S2, EXEC_DENY.slice(0, 3))}`, // 老版本的 deny 列表（短）：不是现在这版起的，不认
+    ` 106 claude --dangerously-skip-permissions`,
+  ].join('\n');
+  assert.deepEqual(workProcs(ps, EXEC_DENY), [{ pid: 101, session: S1 }]);
+});
+
+test('lastTalkAt：只看 user / assistant 的时间；空闲进程写的记账行（没时间戳或 system）不算', () => {
+  const jsonl = [
+    JSON.stringify({ type: 'user', timestamp: '2026-10-23T13:00:00.000Z' }),
+    JSON.stringify({ type: 'assistant', timestamp: '2026-10-23T13:22:00.000Z' }),
+    JSON.stringify({ type: 'system', subtype: 'turn_duration', timestamp: '2026-10-23T13:22:30.000Z' }),
+    JSON.stringify({ type: 'cost-state', totalCostUSD: 1 }),
+    'not json',
+  ].join('\n');
+  assert.equal(lastTalkAt(jsonl), Date.parse('2026-10-23T13:22:00.000Z'));
+  assert.equal(lastTalkAt(''), 0);
+});
+
+test('staleWork：会话是助手的、不在办、最后一句对话超过 30 分钟才收；拿不到对话时间不收', () => {
+  const now = Date.parse('2026-10-27T12:00:00Z'), old = now - 3600_000, fresh = now - 60_000;
+  const procs = [{ pid: 1, session: 'a' }, { pid: 2, session: 'b' }, { pid: 3, session: 'c' }, { pid: 4, session: 'd' }, { pid: 5, session: 'x' }];
+  const talk = { a: old, b: old, c: fresh, d: 0, x: old };
+  const r = staleWork(procs, { known: new Set(['a', 'b', 'c', 'd']), busy: new Set(['b']), lastTalk: (s) => talk[s], now });
+  assert.deepEqual(r.map((p) => p.pid), [1]);
 });

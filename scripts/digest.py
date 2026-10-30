@@ -88,6 +88,32 @@ def cost_summary(events, now_ms):
     if other: parts.append(f"记忆整理 ${usd(other):.2f}")
     return f"**过去 24 小时花费** ${usd(xs):.2f}：" + '、'.join(parts)
 
+REASONS = ['判了不用回', '查错或跑偏', '他自己办了', '口径不同', '先反问', '没听懂意图', '只是改短', '接着说别的']
+
+def self_handled(d):
+    """昨天我没用草稿、自己在原会话回掉的卡（collect_signals 编号 + 抽取时归的类）→ 日报一节；没有就空串。
+    最值得看的是「查错或跑偏」：逐条列出草稿说了什么、我怎么回的"""
+    f = d / 'signals.json'
+    if not f.exists(): return ''
+    sig = json.loads(f.read_text())
+    items = sig.get('items') or []
+    if not items: return ''
+    so = {}
+    try: so = json.loads((d / 'candidates' / 'zz-signals.json').read_text()).get('structured_output') or {}
+    except Exception: pass
+    why = {r.get('n'): r for r in so.get('reviews') or [] if r.get('reason') in REASONS}
+    count = {k: sum(why.get(x['n'], {}).get('reason') == k for x in items) for k in REASONS}
+    sk = sum(bool(x.get('skipped')) for x in items)
+    head = f'**你自己回掉的卡 {len(items)} 张**（有草稿你没用{f"，或助手判了不用回你却回了 {sk} 张" if sk else ""}）：' + '、'.join(f'{k} {v}' for k, v in count.items() if v)
+    if len(why) < len(items): head += f'{"、" if why else ""}没归类 {len(items) - len(why)}'
+    rest = [f"另有没草稿的 {sig['no_draft']} 张" if sig.get('no_draft') else '', f"回的是同一个人后来那张卡的 {sig['unpaired']} 张不算" if sig.get('unpaired') else '']
+    if any(rest): head += '（' + '，'.join(x for x in rest if x) + '）'
+    cut = lambda t, n: t if len(t) <= n else t[:n] + '…'
+    one = lambda t: re.sub(r'<at [^>]*>([^<]*)</at>', r'@\1', ' '.join(str(t).split()))  # 压成一行，<at> 换成 @名字
+    wrong = [f"- {x['sender']}：{one(why[x['n']].get('note') or '')}\n  草稿：{cut(one(x['draft']), 80)}\n  你回：{cut(one(' / '.join(x['actual'])), 80)}"
+             for x in items if why.get(x['n'], {}).get('reason') in ('查错或跑偏', '判了不用回')]
+    return head + ('\n**查错或跑偏 / 判了不用回的**\n' + '\n'.join(wrong) if wrong else '')
+
 def main(day, status):
     cfg = fra_config.load_or_exit()
     WY, DIGESTS, COMMITS = Path(cfg['memory_dir']), Path(cfg['home']) / 'digests', Path(cfg['home']) / 'commitments.jsonl'
@@ -114,6 +140,8 @@ def main(day, status):
     events = [e for f in sorted(events_dir.glob('*.jsonl'))[-2:] for e in fra_config.read_jsonl(f)] if events_dir.exists() else []
     spent = cost_summary(events, dt.datetime.now().timestamp() * 1000)
     if spent: parts.append(spent)
+    sh = self_handled(Path(cfg['home']) / 'corpus' / 'daily' / day)
+    if sh: parts.append(sh)
     parts.append(f'**新增 {len(added)} 条**\n{lst(added)}' if added else '昨天没有新增记忆。')
     if updated: parts.append(f'**追加 {len(updated)} 条**\n{lst(updated)}')
     if review_md: parts.append(review_md)
@@ -122,7 +150,7 @@ def main(day, status):
     tasks = sync_done(open_tasks(fra_config.read_jsonl(tasks_file)), tasks_file, fra_config.bin_path('lark-cli'))
     if tasks: parts.append(f'**任务清单里还没做完的 {len(tasks)} 个**（去任务卡点「开工」或「完成」）\n' + lst([f"{t['title']}（{'开工了' if t['status'] == 'started' else '待开发'}）" for t in tasks]))
     owed = open_commitments(fra_config.read_jsonl(COMMITS))
-    if owed: parts.append(f'**以你身份答应了、还没做的 {len(owed)} 条**（去那张卡点「去做」，或在卡下说「不做了」）\n{lst(owed)}')
+    if owed: parts.append(f'**以你身份答应了、还没做的 {len(owed)} 条**（去那张卡点「去办答应的事」，或在卡下说「不做了」）\n{lst(owed)}')
     md = '\n\n'.join(parts)
     r = subprocess.run([fra_config.bin_path('lark-cli'), 'im', '+messages-send', '--as', 'bot', '--chat-id', cfg['draft_chat_id'], '--markdown', md],
                        env=fra_config.bot_env(cfg), capture_output=True, text=True)
