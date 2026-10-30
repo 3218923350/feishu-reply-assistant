@@ -158,3 +158,20 @@ test('loadConfig：task_list_id 可选，不写就是 null', () => {
   const bad = fixture({ ...MIN, task_list_id: 1 });
   assert.throws(() => loadConfig({ env: { FRA_HOME: bad.fra }, home: bad.home }), /task_list_id/);
 });
+
+test('loadConfig：这一版新加的可调项，不写有默认值，写错给人话', () => {
+  const a = fixture({ ...MIN });
+  const c = loadConfig({ env: { FRA_HOME: a.fra }, home: a.home });
+  assert.deepEqual([c.taskAgent, c.ackAfterMs, c.ackText, c.draftTimeoutMs, c.maxTurns, c.maxParallel, c.groupReplyInThread, c.followThreadMs, c.dailyReview],
+    ['claude', 5 * 60_000, '收到，我看一下', 40 * 60_000, null, 4, true, 6 * 3600_000, true]);
+  const b = fixture({ ...MIN, ack_after_minutes: 0, follow_thread_hours: 0, group_reply_in_thread: false, max_turns: 20, task_agent: 'codex', daily_review: false });
+  const d = loadConfig({ env: { FRA_HOME: b.fra }, home: b.home });
+  assert.deepEqual([d.ackAfterMs, d.followThreadMs, d.groupReplyInThread, d.maxTurns, d.taskAgent, d.dailyReview], [0, 0, false, 20, 'codex', false]);
+  const t = JSON.parse(fs.readFileSync('templates/config.example.json', 'utf8'));
+  const x = fixture({ ...t, ...MIN });
+  assert.equal(loadConfig({ env: { FRA_HOME: x.fra }, home: x.home }).maxTurns, null); // 照模板复制：不限轮数
+  for (const [k, v] of [['ack_after_minutes', -1], ['follow_thread_hours', '6'], ['group_reply_in_thread', 'yes'], ['task_agent', 1]]) {
+    const bad = fixture({ ...MIN, [k]: v });
+    assert.throws(() => loadConfig({ env: { FRA_HOME: bad.fra }, home: bad.home }), new RegExp(k));
+  }
+});

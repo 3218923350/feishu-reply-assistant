@@ -5,6 +5,8 @@ set -u
 HERE=$(cd "$(dirname "$0")" && pwd); export PYTHONPATH="$HERE"
 DAY=${1:-$(date -v-1d +%F)}; shift $(( $# > 0 ? 1 : 0 ))
 HOME_DIR=$(python3 -c 'import fra_config; print(fra_config.fra_home())' 2>/dev/null || echo "$HOME/.feishu-reply-assistant")
+# 配置里 daily_review: false 就不跑
+python3 -c 'import json, sys, fra_config; sys.exit(1 if json.load(open(fra_config.fra_home() / "config.json")).get("daily_review") is False else 0)' 2>/dev/null || { echo "配置里关了每日复盘（daily_review: false）"; exit 0; }
 OUT=${REVIEW_OUT:-$HOME_DIR/corpus/daily/$DAY}; mkdir -p "$OUT"
 python3 "$HERE/daily_review.py" "$DAY" "$@" > "$OUT/review-data.md" || exit 1
 PROMPT=$(python3 "$HERE/fra_config.py" fill "$HERE/review_prompt.md") || exit 1

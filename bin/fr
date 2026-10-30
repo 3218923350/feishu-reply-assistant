@@ -95,7 +95,7 @@ function postCopy(text, files) {
 }
 
 function sendArgs(t, extra) {
-  if (t.kind === 'orig') return ['im', '+messages-reply', '--as', 'user', '--message-id', t.id, ...(ctx.orig.chat_type !== 'p2p' ? ['--reply-in-thread'] : []), ...extra];
+  if (t.kind === 'orig') return ['im', '+messages-reply', '--as', 'user', '--message-id', t.id, ...(ctx.orig.thread_id || (ctx.orig.chat_type !== 'p2p' && cfg.groupReplyInThread) ? ['--reply-in-thread'] : []), ...extra];
   return ['im', '+messages-send', '--as', 'user', t.kind === 'user' ? '--user-id' : '--chat-id', t.id, ...extra];
 }
 

@@ -24,6 +24,7 @@
 | 在对方消息上点「了解」表情（配置 `auto_react` 为 false 时不点） | `im reactions create` | `im:message.reactions:write_only` |
 | 发附件；起草时下载消息里的图片看 | `im +messages-reply --file`、`im +messages-resources-download`（起草的 Claude 用） | `im:resource` |
 | 按名字找人、找群（`bin/fr --to 人名`） | `contact +search-user`、`contact +get-user`、`im +chat-search` | `contact:user:search`、`contact:user.base:readonly`、`im:chat:read` |
+| 卡上「加入任务」建飞书任务、点「完成」勾掉、日报里查完成没有（不用这个功能可以不开） | `task +create`、`task +complete`、`task tasks get` | `task:task:write`（授权：`lark-cli auth login --domain task`） |
 
 机器人身份（应用权限，开通即可）：
 

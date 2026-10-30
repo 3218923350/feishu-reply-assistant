@@ -27,7 +27,7 @@ A Feishu (Lark) reply assistant for one person on one Mac. It watches messages t
 每天 06:30：昨天的飞书 → 抽记忆 → 和已有记忆合并 → 草稿群发「记忆日报」（新增、待你确认、到期的事、昨天花了多少钱、你没用草稿自己回掉的卡按原因分类，查错或跑偏的逐条列出）
 ```
 
-更多设计考虑见 docs/DESIGN.md，记忆格式见 docs/MEMORY.md。
+更多设计考虑见 docs/DESIGN.md，记忆格式见 docs/MEMORY.md。从旧版本升级看 docs/UPGRADE.md（每版改了什么在 CHANGELOG.md）。
 
 ## 需要什么
 
@@ -88,6 +88,15 @@ doctor 检查的项：系统是 macOS、Node ≥ 24、Claude Code、lark-cli、g
 | `desktop_send` | 否 | `true`：外部群网页版没发成时，操作本机已登录的飞书桌面客户端替你发：先跑脚本（`lib/feishu-desktop.swift`，十几秒），不行再让 Codex（`codex exec`）看着界面发。要「辅助功能」权限，助手放进 Orca 终端里跑；发完去会话里核对。默认 `false` |
 | `desktop_model` | 否 | 桌面代发兜底时 Codex 用的模型（比如 `deepseek-v4.1-flash-1017`，要你的 Codex 接得到）；不写用 Codex 自己的默认 |
 | `task_list_id` | 否 | 「加入任务」建的飞书任务放进哪个任务清单（清单链接里 `guid=` 后面那串）；不写就只指给你 |
+| `task_agent` | 否 | 任务卡「开工」在 Orca 里起哪个 agent，默认 `claude`（也可以 `codex` 等 Orca 认识的） |
+| `ack_after_minutes` | 否 | 开了 `auto_send` 时，私聊里查了多少分钟还没完就先回一句，默认 `5`；`0` 不先回 |
+| `ack_text` | 否 | 先回的那句，默认「收到，我看一下」（结尾照样带署名） |
+| `draft_timeout_minutes` | 否 | 起草最多查多少分钟，到点用已查到的收尾，默认 `40` |
+| `max_turns` | 否 | 起草最多几轮工具调用，不写不限（查清楚再交）；环境变量 `FRA_MAX_TURNS` 优先 |
+| `max_parallel` | 否 | 同时起草几条，默认 `4` |
+| `group_reply_in_thread` | 否 | 群里的回复开话题，默认 `true`；`false` 用引用回复（原消息本来在话题里的照样回进话题） |
+| `follow_thread_hours` | 否 | 群里发出去的话题，盯原发消息的人多少小时（他接着回不用 @你 也会起草），默认 `6`；`0` 不盯 |
+| `daily_review` | 否 | 每天记忆日报之后发一条复盘（昨天每条消息怎么了结的、你自己回掉的原因、明天改什么），默认 `true` |
 | `launchd_label` | 否 | launchd 服务名，默认 `com.feishu-reply-assistant` |
 
 ## 日常怎么用
