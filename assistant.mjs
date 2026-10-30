@@ -458,14 +458,14 @@ async function handleCommand(item, draftId, text) {
   return work(item, draftId, d.text);
 }
 
-// 发之前查一遍：草稿里答应了还没做的事、或者没验证就说「已经好了」，不发，卡上标出来（「照发，事我自己办」才发）
+// 发之前查一遍：草稿里答应了还没做的事、或者没验证就说「已经好了」，不发，卡上标出来（「让它去办」先办再发；「照发，我自己办」才直接发）
 async function guardedSend(item, draftId, { edited = false, typed = false } = {}) {
   const c = claims(item.draft);
   const bad = [...c.promise, ...(item.verified ? [] : c.done)];
   if (!bad.length) return sendReply(item, draftId, { edited });
   log('guard', `拦下 ${item.orig.sender_name} ${draftId}：${bad.join('｜')}`);
   if (item.view) await patchCard(draftId, renderView(item.view, { draft: item.draft, warning: bad, pending: pendingOf({ session: item.session }) })).catch((e) => log('ERR patch', e.message));
-  if (typed || !item.view) await botReply(draftId, `⚠️ 没发：这句里写了「${bad.join('」「')}」，事还没做就发出去对方会等着。要它去做就点卡上的「办」；你自己去办就点「照发，事我自己办」`);
+  if (typed || !item.view) await botReply(draftId, `⚠️ 没发：这句里写了「${bad.join('」「')}」，事还没做就发出去对方会等着。点卡上的「让它去办」先办再发；你自己去办就点「照发，我自己办」`);
 }
 
 // auto：没等我确认直接发的（判定「直接发」、硬规则也没拦）——结尾带署名；外部会话不自动走网页版，留给我点
@@ -906,7 +906,7 @@ async function closeHandled() {
   // 急的承诺（说了「现在 / 马上」）30 分钟还没做：在那张卡下提醒一次
   for (const r of dueReminders(readCommits())) {
     appendCommit({ op: 'reminded', id: r.id, at: Date.now() });
-    if (r.card) botReply(r.card, `⏳ ${Math.round((Date.now() - r.at) / 60_000)} 分钟前答应了${r.toName}「${r.what}」，还没做。点卡上的「去办答应的事」，或者在卡下说「不做了」`).catch((e) => log('ERR remind', e.message));
+    if (r.card) botReply(r.card, `⏳ ${Math.round((Date.now() - r.at) / 60_000)} 分钟前答应了${r.toName}「${r.what}」，还没做。点卡上的「去办」；自己办好了点「我办好了」，不办了点「不办了」`).catch((e) => log('ERR remind', e.message));
   }
   const sent = sentIds(recentEvents());
   let n = 0;
@@ -958,8 +958,8 @@ function listenClicks() {
   p.on('close', (code) => { const { delay, line } = clickLog.exit(code); if (line) log('clicks', line); setTimeout(listenClicks, delay); });
 }
 
-// 「发出这句」：发卡上输入框里的（我可能改过）；「不回，收起」：跳过；「按吩咐办」：吩咐框里的话交给起草会话，框空着不起办事；
-// 「办勾选的 / 执行上面要做的」：勾的（或卡上写好的要做的事）就是授权，办完验证过再发「办完发给他的话」
+// 「发出这句」：发卡上输入框里的（我可能改过）；「不回」：跳过；「照我说的办」：吩咐框里的话交给起草会话，框空着不起办事；
+// 「办勾选项 / 去办」：勾的（或卡上写好的要做的事）就是授权，办完验证过再发「办完回他的话」；「让它去办」：被拦下的话里答应的事先办了再发
 async function onClick(line) {
   let ev; try { ev = JSON.parse(line); } catch { return; }
   const c = parseClick(ev, ME_BOT);
@@ -979,6 +979,10 @@ async function onClick(line) {
       item.status = 'pending';
       return await work(item, c.card, `去做之前答应的：${open.map((r) => r.what).join('；')}；做完告诉${[...new Set(open.map((r) => r.toName))].join('、')}`);
     }
+    if (c.action === 'kept_self' || c.action === 'drop') { // 答应的事我自己办好了 / 不办了：关掉，不再提醒
+      for (const r of openCommitments(readCommits(), { card: c.card })) appendCommit({ op: c.action === 'drop' ? 'dropped' : 'kept', id: r.id, at: Date.now(), by: 'me' });
+      return refreshCard(c.card);
+    }
     if (item.status === 'handled') item.status = 'pending'; // 收起的卡，我又点了：接着办
     if (item.status !== 'pending') return refreshCard(c.card);
     const draft = c.draft.trim(), edited = !!draft && draft !== (item.draft || '').trim();
@@ -986,12 +990,17 @@ async function onClick(line) {
     if (c.action === 'skip') return await handleCommand(item, c.card, '不');
     if (c.action === 'send') return await guardedSend(item, c.card, { edited });
     if (c.action === 'send_anyway') return await sendReply(item, c.card, { edited }); // 我自己办：照发，承诺记账
+    if (c.action === 'do_promise') { // 被拦下：话里答应的事先让它办了，验证过再把这句发出去
+      const bad = [...claims(item.draft).promise, ...(item.verified ? [] : claims(item.draft).done)];
+      const text = `去把这句里说的事办了：「${bad.join('」「') || item.draft}」；办完、验证过，再把卡上这句发给${item.orig.sender_name}`;
+      return await work(item, c.card, text, `${cfg.name}在卡上点了「让它去办」。要发给${item.orig.sender_name}的话是：「${item.draft}」。里面说的「${bad.join('」「')}」还没做：先去做、验证过，再把这句发出去（做的结果和这句对不上就改成实际结果再发）。`);
+    }
     if (c.action === 'approve') {
       // 要动手、没选项的卡：卡上写好的「要做」就是唯一一项；草稿在「办完发给他的话」框里
       const todo = !item.options?.length && item.kind === 'action' && item.view?.res?.proposed_actions?.trim();
       const options = todo ? [{ id: 'todo', label: todo }] : item.options || [];
       const selected = todo ? ['todo'] : c.selected;
-      if (!selected.length) return await botReply(c.card, '先勾选（或在下拉里选）要办的，再点「办勾选的，办完再回他」');
+      if (!selected.length) return await botReply(c.card, '先勾选（或在下拉里选）要办的，再点「办勾选项」');
       // 卡上的输入框就是最终版：我清空了就是「只办不发」，不退回卡片原来的草稿（回调里没有这个字段的老卡才用原来的）
       const after = String(c.form.draft_after ?? (todo ? item.draft : item.draft_after) ?? '').trim();
       const { authText, intro } = approvePrompt(options, selected, after, item.orig.sender_name);
@@ -999,10 +1008,10 @@ async function onClick(line) {
       return await work(item, c.card, authText, intro);
     }
     // 吩咐框空着不起办事：只想发就点「发出这句」，有选项就点「办」（空吩咐不等于「全照卡上办」，会把没勾的也做了）
-    if (!c.note) return await botReply(c.card, `先在吩咐框里写要它做什么，再点「${item.kind === 'report' && !item.draft?.trim() ? '接着办' : '按吩咐办'}」${item.draft?.trim() ? '；只想把上面那句发出去就点「发出这句」' : ''}`);
+    if (!c.note) return await botReply(c.card, `先在吩咐框里写要它做什么，再点「${item.kind === 'report' && !item.draft?.trim() ? '接着办' : '照我说的办'}」${item.draft?.trim() ? '；只想把上面那句发出去就点「发出这句」' : ''}`);
     // 吩咐是授权原话（fr 按它校验）；改过的拟发送一起告诉它，但不算授权
     const after = c.draft_after.trim(), afterEdited = !!after && after !== (item.draft_after || item.draft || '').trim();
-    return await work(item, c.card, c.note, `${cfg.name}在草稿卡片上点了「按吩咐办」，吩咐：「${c.note}」${edited ? `\n他把拟发送改成了：「${draft}」` : ''}${afterEdited ? `\n他把办完发的话改成了：「${after}」` : ''}`);
+    return await work(item, c.card, c.note, `${cfg.name}在草稿卡片上点了「照我说的办」，吩咐：「${c.note}」${edited ? `\n他把拟发送改成了：「${draft}」` : ''}${afterEdited ? `\n他把办完发的话改成了：「${after}」` : ''}`);
   } catch (e) { log('ERR click', e.message); botReply(c.card, `❌ ${e.message}`).catch(() => {}); }
 }
 

@@ -123,3 +123,15 @@ test('群里发出去的卡点「不用盯了」：这张卡发出的消息不�
   assert.match(r.calls, /messages patch .*已不再盯这个话题/);
   assert.ok(!r.sentAsMe && !r.worked);
 });
+
+test('被拦下的卡点「让它去办」：起办事，授权写明先办话里答应的事、验证过再把这句发给他；不先以我身份发', () => {
+  const r = click({ kind: 'answer', draft: '我马上给你开一下，开好告诉你', view: { type: 'draft', res: { kind: 'answer', draft: '我马上给你开一下，开好告诉你' } } }, { draft: '我马上给你开一下，开好告诉你', note: '' }, 'do_promise');
+  assert.ok(r.worked, r.calls);
+  assert.ok(!r.sentAsMe, r.calls);
+  assert.match(r.ctx.authText, /去把这句里说的事办了：「.*马上给你开.*」；办完、验证过，再把卡上这句发给李四/);
+});
+
+test('答应了还没做的卡点「我办好了」：承诺关掉，不起办事、不发', () => {
+  const r = click({ kind: 'answer', draft: '好，我晚点给你开', status: 'sent', sentText: '好，我晚点给你开' }, {}, 'kept_self', {});
+  assert.ok(!r.worked && !r.sentAsMe, r.calls);
+});
