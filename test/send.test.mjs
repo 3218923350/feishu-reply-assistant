@@ -11,6 +11,8 @@ test('外部群提示：说清原因、给原消息链接、列出附件', () =>
   const t = manualNotice({ orig: { chat_name: '阿里云对接', link: 'https://applink/x' }, files: ['/a/b.csv'] });
   assert.match(t, /外部群/);
   assert.match(t, /剪贴板/);
+  assert.match(t, /长按复制或转发/);
+  assert.match(t, /重发/);
   assert.match(t, /\(https:\/\/applink\/x\)/);
   assert.match(t, /\/a\/b\.csv/);
   assert.ok(!/附件/.test(manualNotice({ orig: { chat_name: 'x', link: 'l' } })));

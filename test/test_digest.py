@@ -26,5 +26,11 @@ class CostSummary(unittest.TestCase):
         self.assertEqual(cost_summary([], now), '')
         self.assertEqual(cost_summary([ev('draft', 0.3, 's1')], now), '**过去 24 小时花费** $0.30：起草 1 条 $0.30')
 
+class OpenTasks(unittest.TestCase):
+    def test_open_tasks(self):
+        from digest import open_tasks
+        log = [{'op': 'add', 'id': 'a', 'title': '修 A'}, {'op': 'add', 'id': 'b', 'title': '修 B'}, {'op': 'start', 'id': 'a'}, {'op': 'done', 'id': 'b'}, {'op': 'done', 'id': 'zz'}]
+        self.assertEqual([(t['title'], t['status']) for t in open_tasks(log)], [('修 A', 'started')])
+
 if __name__ == '__main__':
     unittest.main()

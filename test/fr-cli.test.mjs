@@ -10,7 +10,7 @@ const NODE = process.execPath;
 
 // 假 lark-cli：按参数返回固定结果，并把每次调用记到 calls.log
 const CONFIG = { name: '张三', open_id: 'ou_me', draft_chat_id: 'oc_draft', messenger_url: 'https://example.feishu.cn/next/messenger/', secret_prefixes: ['abc'] };
-function setup({ external = false, web = 'off', thread = 'omt_1', authText = '可以直接发 然后找一下赵六吧 等他改好了 我们复测没问题再回复一遍', ctxOver = {}, config = CONFIG } = {}) {
+function setup({ external = false, web = 'off', thread = 'omt_1', authText = '可以直接发 然后找一下赵六吧 等他改好了 我们复测没问题再回复一遍', ctxOver = {}, config = CONFIG, tabs = true, desktop = null } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fr-'));
   if (config) fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify(config));
   const lark = path.join(dir, 'lark');
@@ -21,18 +21,20 @@ case "$*" in
   *"+search-user"*王五*) echo '{"ok":true,"data":{"users":[{"open_id":"ou_u5","localized_name":"王五"}]}}' ;;
   *"+search-user"*) echo '{"ok":true,"data":{"users":[]}}' ;;
   *"+chat-search"*) echo '{"ok":true,"data":{"chats":[]}}' ;;
-  *"+chat-messages-list"*) ${web === 'ok' ? `echo '{"ok":true,"data":{"messages":[{"message_id":"om_web_1","sender":{"id":"ou_me"},"content":"收到 谢谢"}]}}'` : `echo '{"ok":true,"data":{"messages":[]}}'`} ;;
+  *"+chat-messages-list"*) ${web === 'ok' || desktop === 'ok' ? `echo '{"ok":true,"data":{"messages":[{"message_id":"om_web_1","sender":{"id":"ou_me"},"content":"收到 谢谢"}]}}'` : `echo '{"ok":true,"data":{"messages":[]}}'`} ;;
   *"+messages-"*) ${external ? `echo '{"ok":false,"error":{"code":230027,"subtype":"user_unauthorized"}}' >&2; exit 1` : `echo '{"ok":true,"data":{"message_id":"om_sent_'$RANDOM'"}}'`} ;;
   *) echo '{"ok":true,"data":{}}' ;;
 esac
 `, { mode: 0o755 });
-  // 假 orca：网页版飞书那一套（tab list / eval / keypress），eval 的结果按 web 参数给
+  // 假 orca：网页版飞书那一套（tab list / eval），每一步 eval 都回同一个结果：web=fail 时搜索框打不开；否则已经在「某项目群」里，粘贴、发送都成
   const orca = path.join(dir, 'orca');
-  const evalOut = web === 'fail' ? '{\\"sent\\":false,\\"why\\":\\"搜不到\\"}' : '{\\"sent\\":true}';
+  const evalOut = web === 'fail' ? '{\\"loaded\\":true,\\"header\\":\\"\\",\\"ok\\":false,\\"why\\":\\"搜不到\\"}'
+    : '{\\"loaded\\":true,\\"header\\":\\"某项目群\\",\\"composer\\":true,\\"empty\\":true,\\"ok\\":true,\\"same\\":true}';
   fs.writeFileSync(orca, `#!/bin/bash
 echo "orca $@" >> ${dir}/calls.log
 case "$*" in
-  *"tab list"*) echo '{"ok":true,"result":{"tabs":[{"index":0,"browserPageId":"pg1","url":"https://example.feishu.cn/next/messenger/"}]}}' ;;
+  *"tab list"*) echo '{"ok":true,"result":{"tabs":[${tabs ? '{"index":0,"browserPageId":"pg1","url":"https://example.feishu.cn/next/messenger/"}' : ''}]}}' ;;
+  *"tab create"*) echo '{"ok":true,"result":{"browserPageId":"pg1"}}' ;;
   *eval*) echo '{"ok":true,"result":{"result":"${evalOut}"}}' ;;
   *) echo '{"ok":true,"result":{}}' ;;
 esac
@@ -40,7 +42,20 @@ esac
   const ctx = path.join(dir, 'ctx.json');
   fs.writeFileSync(ctx, JSON.stringify({ card: 'om_card', session: 's1', cwd: '/w', authText,
     orig: { message_id: 'om_orig', chat_id: 'oc_proj', chat_name: '某项目群', thread_id: thread, sender_id: 'ou_u4', sender_name: '冯五', chat_type: 'group' }, ...ctxOver }));
-  const env = { ...process.env, HOME: dir, FR_CTX: ctx, FRA_HOME: dir, FR_LARK: lark, FR_PBCOPY: '/bin/cat', FR_ORCA: orca, FR_WEB_POLL_MS: '10' };
+  // 假的桌面脚本：state 说有权限（直接跑，不开 Orca 终端），open / send 都说不行，逼到 Codex 那一步
+  const helper = path.join(dir, 'helper');
+  fs.writeFileSync(helper, `#!/bin/bash
+echo "helper $@" >> ${dir}/calls.log
+[ "$1" = state ] && echo '{"ok":true}' && exit 0
+echo '{"ok":false,"why":"假脚本"}'; exit 1
+`, { mode: 0o755 });
+  // 假 codex：把结果写进 -o 指的文件（desktop=ok 时说发了，会话里也能核对到）
+  const codex = path.join(dir, 'codex');
+  fs.writeFileSync(codex, `#!/bin/bash
+echo "codex $@" >> ${dir}/calls.log
+while [ $# -gt 0 ]; do [ "$1" = "-o" ] && echo '{"sent": ${desktop === 'ok'}}' > "$2"; shift; done
+`, { mode: 0o755 });
+  const env = { ...process.env, HOME: dir, FR_CTX: ctx, FRA_HOME: dir, FR_LARK: lark, FR_PBCOPY: '/bin/cat', FR_ORCA: orca, FR_CODEX: codex, FRA_DESKTOP_HELPER: helper, FR_WEB_POLL_MS: '10' };
   const fr = (...args) => spawnSync(NODE, [FR, ...args], { env, encoding: 'utf8' });
   const events = () => fs.readdirSync(path.join(dir, 'events')).flatMap((f) => fs.readFileSync(path.join(dir, 'events', f), 'utf8').trim().split('\n')).map(JSON.parse);
   const calls = () => (fs.existsSync(`${dir}/calls.log`) ? fs.readFileSync(`${dir}/calls.log`, 'utf8') : '');
@@ -111,11 +126,18 @@ test('附件里有密钥：没我允许就拒发，正文也不发', () => {
   assert.ok(!/\+messages-/.test(s.calls()));
 });
 
-test('外部会话 230027：放剪贴板、记待手动、退出码 3', () => {
+test('外部会话 230027：放剪贴板、记待手动、退出码 3；原文贴在卡片下面（卡片里的字复制不了）', () => {
   const s = setup({ external: true });
   const r = s.fr('send', '--to', 'orig', '--text', '收到', '--why', '可以直接发');
   assert.equal(r.status, 3);
   assert.equal(s.events().find((x) => x.kind === 'fr-manual')?.text, '收到');
+  assert.match(s.calls(), /\+messages-reply --as bot --message-id om_card --text 收到/);
+});
+
+test('正文用了 markdown 列表：按富文本发', () => {
+  const s = setup();
+  assert.equal(s.fr('send', '--to', 'orig', '--text', '查到了：\n- 一\n- 二', '--why', '可以直接发').status, 0);
+  assert.match(s.calls(), /\+messages-reply .*--markdown 查到了/);
 });
 
 test('外部会话 230027：改用 Orca 里的网页版飞书发，核对到消息才算已发', () => {
@@ -197,7 +219,7 @@ test('没配置 messenger_url 的外部会话：不走网页版，放剪贴板�
 });
 
 test('仓库路径带空格：网页替发传给 Orca 的 worktree 路径是真实路径（不是 %20）', () => {
-  const s = setup({ external: true, web: 'ok', thread: null });
+  const s = setup({ external: true, web: 'ok', thread: null, tabs: false }); // 没有现成的网页版飞书标签页，才在仓库的 worktree 里开
   const spaced = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'fr sp ')), 'repo');
   for (const d of ['bin', 'lib']) fs.cpSync(path.resolve(d), path.join(spaced, d), { recursive: true });
   const r = spawnSync(NODE, [path.join(spaced, 'bin/fr'), 'send', '--to', 'orig', '--text', '收到 谢谢', '--why', '可以直接发'], { env: s.env, encoding: 'utf8' });
@@ -211,6 +233,22 @@ test('外部会话网页版发成功但带了附件：提示里写的是我的�
   const f = path.join(s.dir, 'a.txt'); fs.writeFileSync(f, 'x');
   const r = s.fr('send', '--to', 'orig', '--text', '收到 谢谢', '--why', '可以直接发', '--file', f);
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /要张三手动发/);
+  assert.match(r.stdout, /要张三手动转发/);
+  assert.match(s.calls(), /\+messages-reply --as bot --message-id om_card --file a\.txt/); // 附件贴在卡片下面，好转发
   assert.ok(!r.stdout.includes('${'));
+});
+
+test('外部会话：网页版没发成、开了 desktop_send → 走飞书客户端（先脚本），核对到才算已发', () => {
+  const s = setup({ external: true, web: 'fail', desktop: 'ok', thread: null, config: { ...CONFIG, desktop_send: true } });
+  const r = s.fr('send', '--to', 'orig', '--text', '收到 谢谢', '--why', '可以直接发');
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /飞书客户端/);
+  assert.match(s.calls(), /helper open 某项目群/);
+  assert.equal(s.events().find((x) => x.kind === 'fr-sent')?.via, 'desktop');
+});
+
+test('外部会话：没开 desktop_send 就不碰飞书客户端', () => {
+  const s = setup({ external: true, web: 'fail', desktop: 'ok', thread: null });
+  assert.equal(s.fr('send', '--to', 'orig', '--text', '收到', '--why', '可以直接发').status, 3);
+  assert.ok(!/codex|helper/.test(s.calls()));
 });

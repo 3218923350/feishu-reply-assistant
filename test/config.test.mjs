@@ -133,3 +133,28 @@ test('loadConfig：auto_react 写 false 就不点表情；照模板复制默认�
   const x = fixture({ ...t, ...MIN });
   assert.equal(loadConfig({ env: { FRA_HOME: x.fra }, home: x.home }).autoReact, true);
 });
+
+test('loadConfig：auto_send 不写就不自动发；署名默认带上名字，可以改', () => {
+  const a = fixture({ ...MIN });
+  const c = loadConfig({ env: { FRA_HOME: a.fra }, home: a.home });
+  assert.equal(c.autoSend, false);
+  assert.equal(c.autoSignature, `（${MIN.name}的助手代回）`);
+  const b = fixture({ ...MIN, auto_send: true, auto_signature: '—— {{name}}的小助手' });
+  const d = loadConfig({ env: { FRA_HOME: b.fra }, home: b.home });
+  assert.equal(d.autoSend, true);
+  assert.equal(d.autoSignature, `—— ${MIN.name}的小助手`);
+  const t = JSON.parse(fs.readFileSync('templates/config.example.json', 'utf8'));
+  const x = fixture({ ...t, ...MIN });
+  assert.equal(loadConfig({ env: { FRA_HOME: x.fra }, home: x.home }).autoSend, false); // 照模板复制也不自动发
+  const bad = fixture({ ...MIN, auto_send: 'yes' });
+  assert.throws(() => loadConfig({ env: { FRA_HOME: bad.fra }, home: bad.home }), /auto_send/);
+});
+
+test('loadConfig：task_list_id 可选，不写就是 null', () => {
+  const a = fixture({ ...MIN });
+  assert.equal(loadConfig({ env: { FRA_HOME: a.fra }, home: a.home }).taskListId, null);
+  const b = fixture({ ...MIN, task_list_id: 'g1' });
+  assert.equal(loadConfig({ env: { FRA_HOME: b.fra }, home: b.home }).taskListId, 'g1');
+  const bad = fixture({ ...MIN, task_list_id: 1 });
+  assert.throws(() => loadConfig({ env: { FRA_HOME: bad.fra }, home: bad.home }), /task_list_id/);
+});

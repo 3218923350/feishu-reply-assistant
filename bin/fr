@@ -11,9 +11,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { whyOk, inScope, dedupKey, tooShortToCompose } from '../lib/fr.mjs';
-import { webSend } from '../lib/websend.mjs';
+import { sendExternal } from '../lib/desktopsend.mjs';
 import { redact } from '../lib/memory/secrets.mjs';
-import { BIN, ConfigError, loadConfig } from '../lib/config.mjs';
+import { BIN, ConfigError, botEnv, loadConfig } from '../lib/config.mjs';
+import { msgArgs } from '../lib/autosend.mjs';
 import { launcherFor, orcaBin } from '../lib/orca.mjs';
 import { run } from '../lib/run.mjs';
 
@@ -26,6 +27,7 @@ const LARK = process.env.FR_LARK || BIN().lark;
 const hasSecret = (x) => redact(x, { prefixes: cfg.secretPrefixes }).hits;
 const PBCOPY = process.env.FR_PBCOPY || '/usr/bin/pbcopy';
 const ORCA = process.env.FR_ORCA || orcaBin();
+const CODEX = process.env.FR_CODEX || BIN().codex;
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'); // 不用 URL.pathname：路径带空格会变成 %20
 const SECRET_WORD = /key|密钥|秘钥|\bak\b|\bsk\b|token|密码|口令|凭据|凭证|账号/i;
 // 附件按文本扫一遍（二进制 / 太大的扫不了，跳过）
@@ -40,8 +42,8 @@ for (let i = 0; i < rest.length; i++) {
   if (k === 'file') opts.file.push(rest[++i]); else opts[k] = rest[++i];
 }
 
-function lark(args, cwd) {
-  const r = spawnSync(LARK, args, { cwd, encoding: 'utf8', timeout: 60_000 });
+function lark(args, cwd, env = process.env) {
+  const r = spawnSync(LARK, args, { cwd, env, encoding: 'utf8', timeout: 60_000 });
   if (r.error?.code === 'ETIMEDOUT' || r.signal) return { timeout: true };
   const txt = (r.stdout || '').trim() || (r.stderr || '').trim();
   let j; try { j = JSON.parse(txt.slice(txt.indexOf('{'))); } catch { j = { ok: false, error: { message: txt.slice(0, 300) } }; }
@@ -84,6 +86,14 @@ const sentChat = (to) => {
   return hits.at(-1)?.chat_id || null;
 };
 
+// 没发出去的话和附件：机器人在这件事的卡片下发成普通消息，手机上也能长按复制 / 转发过去（卡片里的字复制不了）
+function postCopy(text, files) {
+  if (!ctx.card) return;
+  const say = (args, cwd) => { const r = lark(['im', '+messages-reply', '--as', 'bot', '--message-id', ctx.card, ...args], cwd, botEnv(cfg)); if (!r.ok) process.stderr.write(`卡片下没贴上：${JSON.stringify(r.error || '').slice(0, 160)}\n`); };
+  if (text) say(['--text', text]);
+  for (const f of files) say(['--file', path.basename(f)], path.dirname(path.resolve(f)));
+}
+
 function sendArgs(t, extra) {
   if (t.kind === 'orig') return ['im', '+messages-reply', '--as', 'user', '--message-id', t.id, ...(ctx.orig.thread_id ? ['--reply-in-thread'] : []), ...extra];
   return ['im', '+messages-send', '--as', 'user', t.kind === 'user' ? '--user-id' : '--chat-id', t.id, ...extra];
@@ -104,7 +114,7 @@ if (cmd === 'send') {
   }
   const key = dedupKey(ctx.card, t.id, text);
   if (sentBefore(key)) { console.log(`已经发过（或结果未知），不再重复：${t.name}`); process.exit(0); }
-  const r = lark(sendArgs(t, ['--text', text]));
+  const r = lark(sendArgs(t, msgArgs(text))); // 用了 markdown（列表、代码、链接）就按富文本发
   const base = { key, to: t.id, toName: t.name, text: redact(text, { prefixes: cfg.secretPrefixes }).text, why: opts.why }; // 记录和报告卡上不留明文
   if (r.timeout) { event({ kind: 'fr-unknown', ...base }); die(4, `发给 ${t.name} 超时，结果未知，不要重发，去会话里核对`); }
   if (!r.ok && /230027/.test(JSON.stringify(r.error || ''))) {
@@ -112,20 +122,23 @@ if (cmd === 'send') {
     const o = ctx.orig;
     const chat = t.kind === 'orig' && !o.thread_id ? { name: o.chat_type === 'p2p' ? o.sender_name : o.chat_name, group: o.chat_type !== 'p2p', chatId: o.chat_id }
       : t.kind === 'chat' && t.name !== t.id ? { name: t.name, group: true, chatId: t.id } : null;
-    const web = !chat?.name ? { ok: false, why: o.thread_id ? '原消息在话题里，网页版回不进话题' : '网页版只能发原会话或指定的群' }
-      : !cfg.messengerUrl ? { ok: false, why: '没配置 messenger_url' }
-      : !(await launcherFor(run, ORCA)) ? { ok: false, why: '没开 Orca' }
-      : await webSend({ ...chat, text, orca: ORCA, lark: LARK, repo: REPO, dir: DIR, me: cfg.openId, messenger: cfg.messengerUrl, pollMs: Number(process.env.FR_WEB_POLL_MS || 3000) });
+    const webWhy = !cfg.messengerUrl ? '没配置 messenger_url' : !(await launcherFor(run, ORCA)) ? '没开 Orca' : '';
+    const target = chat?.name && { ...chat, text, lark: LARK, me: cfg.openId, pollMs: Number(process.env.FR_WEB_POLL_MS || 3000) };
+    const web = !target ? { ok: false, why: o.thread_id ? '原消息在话题里，网页版和客户端都回不进话题' : '网页版和客户端只能发原会话或指定的群' }
+      : await sendExternal({ web: webWhy ? null : { ...target, orca: ORCA, repo: REPO, messenger: cfg.messengerUrl }, webWhy,
+        desktop: cfg.desktopSend ? { ...target, codex: CODEX, model: cfg.desktopModel, orca: ORCA, repo: REPO } : null });
     if (web.ok) {
-      event({ kind: 'fr-sent', ...base, via: 'web', message_id: web.message_id });
-      for (const f of opts.file) event({ kind: 'fr-manual', key: dedupKey(ctx.card, t.id, f), to: t.id, toName: t.name, text: `📎 ${path.basename(f)}（网页版还不会发附件）` });
-      console.log(`已发给 ${t.name}（外部会话，用网页版飞书发的，${web.message_id}）${opts.file.length ? `；附件没发，要${NAME}手动发` : ''}`);
+      event({ kind: 'fr-sent', ...base, via: web.via, message_id: web.message_id });
+      for (const f of opts.file) event({ kind: 'fr-manual', key: dedupKey(ctx.card, t.id, f), to: t.id, toName: t.name, text: `📎 ${path.basename(f)}（外部会话代发还不会带附件）`, file: path.resolve(f) });
+      if (opts.file.length) postCopy('', opts.file);
+      console.log(`已发给 ${t.name}（外部会话，用${web.via === 'desktop' ? '飞书客户端' : '网页版飞书'}发的，${web.message_id}）${opts.file.length ? `；附件没发，已贴在卡片下面，要${NAME}手动转发` : ''}`);
       process.exit(0);
     }
-    if (web.unknown) { event({ kind: 'fr-unknown', ...base, via: 'web' }); die(4, `${web.why}：不要重发，报告里写明让${NAME}去会话里看一眼`); }
+    if (web.unknown) { event({ kind: 'fr-unknown', ...base, via: web.via }); die(4, `${web.why}：不要重发，报告里写明让${NAME}去会话里看一眼`); }
     spawnSync(PBCOPY, { input: text });
-    event({ kind: 'fr-manual', ...base, why_manual: web.why });
-    die(3, `${t.name} 是外部会话，飞书不允许以${NAME}身份发（230027），网页版也没发成（${web.why}），已放剪贴板，报告里写明「没发出」`);
+    event({ kind: 'fr-manual', ...base, why_manual: web.why, files: opts.file.map((f) => path.resolve(f)) });
+    postCopy(text, opts.file);
+    die(3, `${t.name} 是外部会话，飞书不允许以${NAME}身份发（230027），代发也没成（${web.why}）。原文和附件已贴在卡片下面（也放了剪贴板），报告里写明「没发出」`);
   }
   if (!r.ok) die(1, `发送失败：${JSON.stringify(r.error).slice(0, 300)}`);
   event({ kind: 'fr-sent', ...base, message_id: r.data?.message_id, chat_id: r.data?.chat_id });

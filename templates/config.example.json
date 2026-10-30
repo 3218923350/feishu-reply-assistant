@@ -24,6 +24,16 @@
   "legacy_work_dir": null,
   "//auto_react": "可选。开始处理时以你的身份在对方消息上点「了解」表情（对方看得到，知道你在处理）；不想点写 false",
   "auto_react": true,
+  "//auto_send": "可选。true：起草时判定为「直接发」（确定、低风险、事实都查过，硬规则也没拦）的，不等你确认直接以你的身份发出，结尾带一行署名；要查很久的，先替你回一句「收到，我看一下」。不写就是 false，全等你点",
+  "auto_send": false,
+  "//auto_signature": "可选。不等你确认发出去的消息结尾加的那一行，{{name}} 会换成你的名字",
+  "auto_signature": "（{{name}}的助手代回）",
+  "//desktop_send": "可选。true：外部群网页版没发成时，操作本机已登录的飞书桌面客户端替你发：先跑脚本（十几秒），不行再让 Codex（codex exec）看着界面发；要「辅助功能」权限，助手会放进 Orca 终端里跑。发没发出去都会去会话里核对。不写就是 false",
+  "desktop_send": false,
+  "//desktop_model": "可选。桌面代发兜底时 Codex 用的模型（比如 deepseek-v4.1-flash-1017，要你的 Codex 接得到）；不写用 Codex 自己的默认模型",
+  "desktop_model": null,
+  "//task_list_id": "可选。卡上「加入任务」建的飞书任务放进哪个任务清单（清单的 guid，飞书里打开清单、链接里 guid= 后面那串）；留 null 就只指给你，不进清单",
+  "task_list_id": null,
   "//launchd_label": "可选。launchd 服务名，默认 com.feishu-reply-assistant",
   "launchd_label": "com.feishu-reply-assistant"
 }

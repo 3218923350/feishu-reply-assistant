@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // 飞书回复助手：盯 @我 / 私聊 → Claude Code 查资料起草 → 草稿群确认 → 以我的身份回复
 import { spawn, spawnSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -13,15 +14,17 @@ import { apiError, approvePrompt, chunk, claim, isExternalDenied, isVerified, ma
 import { claims } from './lib/promise.mjs';
 import { dueReminders, fromSend, openCommitments } from './lib/commitments.mjs';
 import { followupChats, matchFollowup, sentIds, workTitle } from './lib/fr.mjs';
-import { clickWatch, closedCard, draftCard, parseClick, reportCard } from './lib/cards.mjs';
+import { clickWatch, closedCard, draftCard, parseClick, reportCard, taskCard } from './lib/cards.mjs';
 import { finalTier, holds, projectDir, sessionCommands } from './lib/shadow.mjs';
 import { run as runProc } from './lib/run.mjs';
-import { webSend } from './lib/websend.mjs';
+import { sendExternal } from './lib/desktopsend.mjs';
 import { BIN, ConfigError, botEnv, fill, loadConfig } from './lib/config.mjs';
 import { readJsonl } from './lib/jsonl.mjs';
 import { makeAlerter } from './lib/alert.mjs';
 import { launcherFor, orcaBin } from './lib/orca.mjs';
 import { alive, launchWork, workCostOnce } from './lib/work.mjs';
+import { ACK_TEXT, ackAllowed, autoSendable, msgArgs, signed, unfinished } from './lib/autosend.mjs';
+import { repoFor, startPrompt, taskByCard, taskFrom, taskState, taskText, worktreeName } from './lib/tasks.mjs';
 
 let cfg;
 try { cfg = loadConfig(); } catch (e) { if (!(e instanceof ConfigError)) throw e; console.error(e.message); process.exit(1); }
@@ -29,7 +32,7 @@ const ME = cfg.openId; // 我在用户身份应用下的 open_id
 const ME_BOT = cfg.botOpenId; // 我在机器人应用下的 open_id：卡片按钮回调里的 operator_id（单应用时和 ME 相同）
 const LEADERS = cfg.leaders; // 我的上级：放手发也要等我
 const DRAFT_CHAT = cfg.draftChatId; // 草稿群
-const { lark: LARK, claude: CLAUDE } = BIN();
+const { lark: LARK, claude: CLAUDE, codex: CODEX } = BIN();
 const ORCA = orcaBin(); // 可选：没装就是 null，办事改后台跑、外部群走剪贴板、预取不搜本地会话
 const REPO = path.dirname(fileURLToPath(import.meta.url));
 const WORKSPACE = path.join(REPO, 'workspace'); // 起草用的轻目录：不自动加载大仓库的记忆和 CLAUDE.md，需要的记忆由预取塞进 prompt
@@ -41,6 +44,7 @@ const EVENTS = `${DIR}/events`; // 发出的回复、办事结果、fr 回执，
 const FOLLOWUPS = `${DIR}/followups.jsonl`; // fr wait 挂的跟进（只追加：add / fired / done / expired）
 const DIGESTS = `${DIR}/digests`; // 记忆日报卡的编号 → 条目（digest.py 写），我在卡下回「1 3 确认，2 删」用
 const COMMITS = `${DIR}/commitments.jsonl`; // 承诺账本：以我身份答应了、还没做的事（lib/commitments.mjs）
+const TASKS = `${DIR}/tasks.jsonl`; // 要开发的事：add / start / done（lib/tasks.mjs）
 const MEM = path.join(REPO, 'bin/mem');
 const MEM_ITEM = JSON.parse(fs.readFileSync(path.join(REPO, 'schema/memory.json'), 'utf8'));
 const LEARN_SCHEMA = JSON.stringify({ type: 'object', properties: { memories: { type: 'array', items: MEM_ITEM } }, required: ['memories'] });
@@ -51,8 +55,10 @@ const POLL_MS = 90_000; // 扫收件箱
 const CONFIRM_MS = 20_000; // 扫草稿群
 const OVERLAP_MS = 10 * 60_000; // 两次扫描时间窗重叠，防漏
 const FIRST_LOOKBACK_MS = 60 * 60_000; // 首次启动回看
-const MAX_PARALLEL = 2; // 同时跑的 claude 数
-const CLAUDE_TIMEOUT_MS = 15 * 60_000;
+const MAX_PARALLEL = 4; // 同时跑的 claude 数（起草不限轮数，难的要查很久，别让它把简单的堵在后面）
+const CLAUDE_TIMEOUT_MS = 15 * 60_000; // 抽记忆
+const DRAFT_TIMEOUT_MS = 40 * 60_000; // 起草：查清楚再交，查到这么久还没完就用已查到的收尾
+const ACK_AFTER_MS = 5 * 60_000; // 开了直接发：起草过了这么久还没完，先替我回对方一句
 const EXEC_TIMEOUT_MS = 60 * 60_000; // 一轮办事最多等这么久
 const MAX_RETRIES = 2; // 办事时接口报错断了，自动新开终端接着办的次数
 const CLOSE_MS = 3 * 60_000; // 扫一遍待处理卡片：我已经在原会话亲自回了的收起来
@@ -75,8 +81,10 @@ const SCHEMA = JSON.stringify({
     // 要我批的操作拆成选项（卡上勾选），做完才能说的话放 draft_after；draft 只说查实的事
     options: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, label: { type: 'string' }, cost: { type: 'string' }, group: { type: 'string' } }, required: ['id', 'label'] } },
     draft_after: { type: 'string' },
+    // 要开发的事（bug / 反馈查完要改代码、一次说不完的）：卡上给「加入任务」；不是就 title 留空
+    task: { type: 'object', properties: { title: { type: 'string' }, repo: { type: 'string' }, brief: { type: 'string' } }, required: ['title', 'repo', 'brief'] },
   },
-  required: ['kind', 'summary', 'evidence', 'draft', 'proposed_actions', 'used_memories', 'category', 'send_tier', 'facts', 'options', 'draft_after'],
+  required: ['kind', 'summary', 'evidence', 'draft', 'proposed_actions', 'used_memories', 'category', 'send_tier', 'facts', 'options', 'draft_after', 'task'],
 });
 
 // ---------- 基础 ----------
@@ -140,7 +148,8 @@ const OUTCOME_OF = { sent: '已发送', dismissed: '已跳过', working: '在办
 function refreshCard(id, detail) {
   const it = state.items[id];
   if (!it?.ui || !OUTCOME_OF[it.status]) return; // 老的 markdown 卡改不了
-  patchCard(id, closedCard(it.orig, OUTCOME_OF[it.status], detail ?? (it.status === 'sent' ? it.draft : ''), { pending: pendingOf({ card: id }) })).catch((e) => log('ERR patch', e.message));
+  const label = it.status === 'sent' && it.auto ? '已直接发' : OUTCOME_OF[it.status]; // 没等我确认、带署名发出去的
+  patchCard(id, closedCard(it.orig, label, detail ?? (it.status === 'sent' ? it.sentText || it.draft : ''), { pending: pendingOf({ card: id }) })).catch((e) => log('ERR patch', e.message));
 }
 // 影子期记录：卡上「放手会怎么发」和我最后怎么处理的，攒够了在日报里给我看
 const outcome = (id, item, what) => recordEvent('outcome', { card: id, orig: item.orig, what, category: item.shadow?.category, tier: item.shadow?.tier });
@@ -177,7 +186,8 @@ async function pollInbox() {
   const fresh = [];
   for (const m of [...atMe, ...p2p, ...inChats]) {
     if (state.seen[m.message_id]) continue;
-    if (m.sender?.id === ME || m.sender?.sender_type !== 'user') continue;
+    if (m.sender?.id === ME) continue;
+    if (m.sender?.sender_type !== 'user' && m.chat_type === 'p2p') continue; // 机器人在群里 @我 要处理：有人用自己的 agent 以机器人身份发消息（比如某同事让自己的 CLI 发消息）；卡片由下面 msg_type 那行挡掉
     if (m.chat_id === DRAFT_CHAT) continue;
     if (['system', 'interactive', 'sticker', 'share_chat', 'share_user'].includes(m.msg_type)) continue;
     const f = matchFollowup(m, followups, now); // 在等这个人回复：叫醒原会话，不另起草
@@ -200,7 +210,9 @@ async function laterMessages(m) {
   if (m.thread_id) lists.push(lark(['im', '+threads-messages-list', '--as', 'user', '--thread', m.thread_id, '--order', 'desc', '--page-size', '50', '--no-reactions']));
   return (await Promise.all(lists)).flatMap((d) => d.messages || []);
 }
-const alreadyReplied = async (m) => myReplies(m, await laterMessages(m), ME).length > 0;
+// 我亲自回的（助手以我身份发的——先回的那句、直接发的、fr 发的——不算）
+const myOwnReplies = async (m) => { const sent = sentIds(recentEvents()); return myReplies(m, await laterMessages(m), ME).filter((x) => !sent.has(x.message_id)); };
+const alreadyReplied = async (m) => (await myOwnReplies(m)).length > 0;
 
 async function gatherContext(m) {
   const end = parseBJ(m.create_time) + 60_000;
@@ -216,16 +228,25 @@ async function gatherContext(m) {
 }
 
 // ---------- Claude ----------
-async function askClaude(prompt, resume, cwd = WORKSPACE, { final = false } = {}) {
+// 起草不限轮数（以前 12 轮上限，难的问题八成撞顶、交半成品，还得我说「再查一下」）；要限就设 FRA_MAX_TURNS。
+// 会话 id 自己定：查到 DRAFT_TIMEOUT_MS 还没完被掐掉，还能接着这个会话用已查到的收尾
+async function askClaude(prompt, resume, cwd = WORKSPACE, { final = false, continued = false } = {}) {
+  const turns = final ? '3' : process.env.FRA_MAX_TURNS;
+  const session = resume || crypto.randomUUID();
   const args = ['-p', prompt, '--output-format', 'json', '--json-schema', SCHEMA, '--append-system-prompt', PROMPT,
-    ...DRAFT_PERMS, '--max-turns', final ? '3' : String(Number(process.env.FRA_MAX_TURNS) || 12)]; // 收尾也用同一套权限，保住 prompt 缓存
-  if (resume) args.push('--resume', resume);
-  const r = await run(CLAUDE, args, { cwd, timeout: CLAUDE_TIMEOUT_MS });
+    ...DRAFT_PERMS, ...(turns ? ['--max-turns', turns] : []), ...(resume ? ['--resume', resume] : ['--session-id', session])]; // 收尾也用同一套权限，保住 prompt 缓存
+  const r = await run(CLAUDE, args, { cwd, timeout: final ? CLAUDE_TIMEOUT_MS : DRAFT_TIMEOUT_MS });
   let j;
-  try { j = JSON.parse(r.out); } catch { throw new Error(`claude 非 JSON 输出 (exit ${r.code}): ${(r.err || r.out).slice(0, 300)}`); }
+  try { j = JSON.parse(r.out); } catch {
+    if (r.timedOut && !final) {
+      log('claude', `查了 ${DRAFT_TIMEOUT_MS / 60_000} 分钟还没完，收尾 session=${session}`);
+      return askClaude('查的时间到上限了。不要再调用任何工具，就用已经查到的信息，现在按 JSON 字段给出结果；没查清的写进 evidence，并降级为 decision 或 action。', session, cwd, { final: true });
+    }
+    throw new Error(`claude 非 JSON 输出 (exit ${r.code}): ${(r.err || r.out).slice(0, 300)}`);
+  }
   recordEvent('cost', { what: 'draft', usd: j.total_cost_usd ?? null, session: j.session_id }); // 到轮数上限的那次也花了钱
   if (j.is_error && j.subtype === 'error_max_turns' && !final && j.session_id) {
-    // 查到轮数上限：不再查，用已查到的给结论（没查清的降级为拍板/动手）
+    // 查到轮数上限（设了 FRA_MAX_TURNS 才有）：不再查，用已查到的给结论（没查清的降级为拍板/动手）
     log('claude', `到轮数上限 turns=${j.num_turns} cost=$${j.total_cost_usd?.toFixed(2)}，收尾`);
     return askClaude('查的轮数到上限了。不要再调用任何工具，就用已经查到的信息，现在按 JSON 字段给出结果；没查清的写进 evidence，并降级为 decision 或 action。',
       j.session_id, cwd, { final: true });
@@ -234,6 +255,13 @@ async function askClaude(prompt, resume, cwd = WORKSPACE, { final = false } = {}
   let res = j.structured_output;
   if (!res) { try { res = JSON.parse(j.result); } catch { throw new Error(`claude 没有结构化输出: ${String(j.result).slice(0, 300)}`); } }
   log('claude', `kind=${res.kind} turns=${j.num_turns} cost=$${j.total_cost_usd?.toFixed(2)} session=${j.session_id}`);
+  // 草稿里还写着「我再去看下 / 还在查」：没查完就交了，让它接着查一轮（只追一次）
+  const left = !final && !continued && res.kind !== 'skip' && unfinished(res.draft);
+  if (left) {
+    log('claude', `草稿里还留着「${left}」，接着查`);
+    return askClaude(`你的草稿里还写着「${left}」，说明还没查完。接着把它查清楚，再按 JSON 给最终结果。真的查不下去（缺对方的信息、要等别人），草稿里直接问对方要那个信息或说清卡在哪，不要写「我再去看下」这类话。`,
+      j.session_id, cwd, { continued: true });
+  }
   return { ...res, session: j.session_id, cwd, turns: j.num_turns, cost: j.total_cost_usd };
 }
 
@@ -244,7 +272,7 @@ async function postDraft(item, res, replyTo) {
   const m = item.orig;
   const kind = res.kind === 'decision' && res.draft?.trim() ? 'answer' : res.kind; // 拍板后有了草稿就按草稿展示
   const files = (res.files || []).filter((f) => fs.existsSync(f));
-  const view = { type: 'draft', orig: m, res: { ...res, kind, files }, shadow: res.shadow };
+  const view = { type: 'draft', orig: m, res: { ...res, kind, files, acked: acks.get(m.message_id) || null }, shadow: res.shadow };
   const d = replyTo ? await botReplyCard(replyTo, renderView(view)) : await botSendCard(renderView(view));
   state.items[d.message_id] = { orig: m, kind, draft: res.draft, session: res.session, cwd: res.cwd, used_memories: res.used_memories || [], files,
     status: 'pending', createdAt: Date.now(), ui: 'card', shadow: res.shadow, options: res.options || [], draft_after: res.draft_after || '', view };
@@ -253,6 +281,7 @@ async function postDraft(item, res, replyTo) {
   for (const [id, it] of Object.entries(state.items)) if (id !== d.message_id && it.status === 'pending' && it.orig && origKey(it.orig) === origKey(m)) { it.status = 'superseded'; refreshCard(id); }
   saveState();
   log('draft', `${kind} ${m.sender_name} → ${d.message_id}`);
+  return d.message_id;
 }
 // 卡怎么画存在 item.view 里：拦承诺时要带着警告原样重画
 function renderView(view, { draft, warning = [], pending = [] } = {}) {
@@ -283,6 +312,13 @@ async function pollConfirm() {
     if (item.status === 'working') { // 这轮还在办：记下，办完接着处理
       (item.queued ||= []).push({ kind: 'say', text });
       botReply(x.reply_to, '收到，这轮办完接着处理').catch(() => {});
+      continue;
+    }
+    const taskCmd = text.match(/^(?:加入?任务|记成任务|加到任务)[\s：:，,]*([\s\S]*)$/);
+    if (taskCmd) { addTask(item, x.reply_to, taskCmd[1].trim()).catch((e) => { log('ERR task', e.message); botReply(x.reply_to, `❌ ${e.message}`).catch(() => {}); }); continue; }
+    if (item.status === 'manual' && /^(重发|重试|再发一次|再试一次)$/.test(text.replace(/\s/g, ''))) { // 外部会话没发出去的：再用网页版试一次
+      item.status = 'pending';
+      sendReply(item, x.reply_to).catch((e) => { log('ERR resend', e.message); botReply(x.reply_to, `❌ ${e.message}`).catch(() => {}); });
       continue;
     }
     if (item.status !== 'pending') { botReply(x.reply_to, BUSY[item.status] || `这条状态是 ${item.status}`).catch(() => {}); continue; }
@@ -330,60 +366,76 @@ async function guardedSend(item, draftId, { edited = false, typed = false } = {}
   if (typed || !item.view) await botReply(draftId, `⚠️ 没发：这句里写了「${bad.join('」「')}」，事还没做就发出去对方会等着。要做就点「按我说的办」或勾选后「同意所选」；你自己去办就点卡上的「我自己办，先发这句」`);
 }
 
-async function sendReply(item, draftId, { edited = false } = {}) {
+// auto：没等我确认直接发的（判定「直接发」、硬规则也没拦）——结尾带署名；外部会话不自动走网页版，留给我点
+async function sendReply(item, draftId, { edited = false, auto = false } = {}) {
   if (!item.draft?.trim()) return botReply(draftId, '这条没有可发的草稿，先告诉我怎么回。');
   if (!claim(item, 'sending')) return; // 先占住，连点两次也只发一次
   saveState();
-  const args = ['im', '+messages-reply', '--as', 'user', '--message-id', item.orig.message_id, '--text', item.draft];
+  const text = auto ? signed(item.draft, cfg.autoSignature) : item.draft;
+  const args = ['im', '+messages-reply', '--as', 'user', '--message-id', item.orig.message_id, ...msgArgs(text)]; // 用了 markdown 就按富文本发，飞书排好版
   if (item.orig.thread_id) args.push('--reply-in-thread');
   let d, via = '';
   try { d = await lark(args); } catch (e) {
     item.status = 'pending';
     saveState();
     if (!isExternalDenied(e)) throw e;
-    // 外部会话：先用 Orca 里的网页版飞书发（话题里的回不进话题）；不行再放剪贴板让我手动发
+    if (auto) { log('auto', `外部会话不自动发 ${item.orig.chat_name || item.orig.sender_name} ${item.orig.message_id}`); return; } // 卡还在，等我点
+    // 外部会话：先用 Orca 里的网页版飞书发，不行再让 Codex 操作飞书桌面客户端发（话题里的都回不进话题）；都不行就把原文贴在卡下让我复制 / 转发
     const o = item.orig;
-    const web = o.thread_id ? { ok: false, why: '原消息在话题里，网页版回不进话题' }
-      : !cfg.messengerUrl ? { ok: false, why: '没配置 messenger_url' }
-      : !(await launcherFor(run, ORCA)) ? { ok: false, why: '没开 Orca' }
-      : await webSend({ name: o.chat_type === 'p2p' ? o.sender_name : o.chat_name, group: o.chat_type !== 'p2p', chatId: o.chat_id, text: item.draft, orca: ORCA, lark: LARK, repo: REPO, dir: DIR, me: ME, messenger: cfg.messengerUrl });
-    if (web.ok) { d = { message_id: web.message_id }; via = 'web'; }
+    const target = { name: o.chat_type === 'p2p' ? o.sender_name : o.chat_name, group: o.chat_type !== 'p2p', chatId: o.chat_id, text, lark: LARK, me: ME };
+    const webWhy = !cfg.messengerUrl ? '没配置 messenger_url' : !(await launcherFor(run, ORCA)) ? '没开 Orca' : '';
+    const web = o.thread_id ? { ok: false, why: '原消息在话题里，网页版和客户端都回不进话题' } : await sendExternal({
+      web: webWhy ? null : { ...target, orca: ORCA, repo: REPO, messenger: cfg.messengerUrl }, webWhy,
+      desktop: cfg.desktopSend ? { ...target, codex: CODEX, model: cfg.desktopModel, orca: ORCA, repo: REPO } : null,
+      onDesktop: (why) => botReply(draftId, `外部会话，网页版没发成（${why}），改用飞书客户端代发`).catch(() => {}) });
+    if (web.ok) { d = { message_id: web.message_id }; via = web.via; }
     else if (web.unknown) {
       item.status = 'unknown';
       saveState();
       log('web', `结果未知 ${o.chat_name || o.sender_name} ${o.message_id}`);
-      return botReply(draftId, `⚠️ 网页版飞书上点了发送，但在会话里没核对到这条消息，别重发，去会话里看一眼：[打开原消息](${o.link})`);
+      return botReply(draftId, `⚠️ ${web.why}，别重发，去会话里看一眼：[打开原消息](${o.link})`);
     } else {
-      spawnSync('/usr/bin/pbcopy', { input: item.draft });
+      spawnSync('/usr/bin/pbcopy', { input: text });
       item.status = 'manual';
       saveState();
       log('manual', `外部会话 ${o.chat_name || o.sender_name} ${o.message_id}：${web.why}`);
-      recordEvent('manual', { orig: item.orig, text: item.draft, files: item.files || [] });
-      refreshCard(draftId, `草稿已放剪贴板，去原会话手动发（网页版也没发成：${web.why}）`);
-      return botReply(draftId, `${manualNotice(item)}（网页版也没发成：${web.why}）`);
+      recordEvent('manual', { orig: item.orig, text, files: item.files || [], why_manual: web.why });
+      refreshCard(draftId, `没发出去（${web.why}），原文贴在卡片下面；回「重发」再试一次`);
+      await botReply(draftId, `${manualNotice(item)}（${web.why}）`).catch((e) => log('ERR reply', e.message));
+      return postCopy(draftId, text, item.files || []);
     }
   }
   state.seen[d.message_id] = Date.now(); // 自己发的这条别再当成指令
   item.status = 'sent';
+  item.auto = auto;
+  item.sentText = text;
   saveState();
-  outcome(draftId, item, edited ? 'send_edited' : 'send');
+  outcome(draftId, item, auto ? 'auto' : edited ? 'send_edited' : 'send');
   const promise = fromSend(item.draft, { card: draftId, session: item.session, to: item.orig.chat_id, toName: item.orig.sender_name, message_id: d.message_id });
   if (promise) appendCommit(promise); // 话里答应了还没做的事：记账、卡上挂着、到点提醒
   refreshCard(draftId);
-  log('sent', `→ ${item.orig.sender_name} ${item.orig.message_id}`);
+  log('sent', `${auto ? '直接发 ' : ''}→ ${item.orig.sender_name} ${item.orig.message_id}`);
   // 草稿里说要发的文件跟着发（lark-cli 只认当前目录下的相对路径）
   const sentFiles = [];
-  for (const f of via === 'web' ? [] : item.files || []) {
+  for (const f of via ? [] : item.files || []) {
     const fa = ['im', '+messages-reply', '--as', 'user', '--message-id', item.orig.message_id, '--file', path.basename(f)];
     if (item.orig.thread_id) fa.push('--reply-in-thread');
     try { const r = await lark(fa, false, path.dirname(f)); state.seen[r.message_id] = Date.now(); sentFiles.push(f); }
     catch (e) { log('ERR file', f, e.message); botReply(draftId, `⚠️ 文字已发，文件没发出去：${f}（${e.message.slice(0, 120)}）`).catch(() => {}); }
   }
-  recordEvent('sent', { orig: item.orig, text: item.draft, files: sentFiles, used_memories: item.used_memories || [], message_id: d.message_id });
-  learn(item, `这条已经发出，最终发给对方的是：${item.draft}`, { resume: true }).catch((e) => log('ERR learn', e.message));
-  if (item.ui && via !== 'web' && !sentFiles.length) return; // 卡片已经改成「已发送」
-  return botReply(draftId, `✅ 已用你的身份回复 ${item.orig.sender_name}${via === 'web' ? '（外部会话，用网页版飞书发的）' : ''}${sentFiles.length ? `，附件 ${sentFiles.length} 个` : ''}`
-    + (via === 'web' && item.files?.length ? `；附件网页版还不会发，要你手动发：${item.files.join('、')}` : ''));
+  recordEvent('sent', { orig: item.orig, chat_id: item.orig.chat_id, text, files: sentFiles, used_memories: item.used_memories || [], message_id: d.message_id, ...(via ? { via } : {}), ...(auto ? { auto: true } : {}) });
+  learn(item, `这条已经发出，最终发给对方的是：${text}`, { resume: true }).catch((e) => log('ERR learn', e.message));
+  if (via && item.files?.length) postCopy(draftId, '', item.files); // 外部会话代发还不会带附件：贴在卡下，转发过去
+  if (item.ui && !via && !sentFiles.length) return; // 卡片已经改成「已发送」
+  const how = via === 'desktop' ? '飞书客户端' : '网页版飞书';
+  return botReply(draftId, `✅ 已用你的身份回复 ${item.orig.sender_name}${via ? `（外部会话，用${how}发的）` : ''}${sentFiles.length ? `，附件 ${sentFiles.length} 个` : ''}`
+    + (via && item.files?.length ? `；附件代发还不会带，贴在卡片下面了，转发过去：${item.files.join('、')}` : ''));
+}
+
+// 没发出去的话和附件：机器人在卡下发成普通消息，手机上也能长按复制 / 转发到原会话（卡片里的字复制不了）
+async function postCopy(cardId, text, files = []) {
+  if (text) await lark(['im', '+messages-reply', '--as', 'bot', '--message-id', cardId, '--text', text], true).catch((e) => log('ERR copy', e.message));
+  for (const f of files) await lark(['im', '+messages-reply', '--as', 'bot', '--message-id', cardId, '--file', path.basename(f)], true, path.dirname(f)).catch((e) => log('ERR copy-file', f, e.message));
 }
 
 // ---------- 办事：原话交给起草会话，在 Orca 终端里续跑（可围观、可插话）；发消息只能走 bin/fr ----------
@@ -671,15 +723,53 @@ ${pre.text}`;
 async function processBatch(msgs) {
   const todo = msgs.filter((m) => shouldDraft(m, state));
   if (!todo.length) return log('skip', '已有草稿', msgs.at(-1).message_id);
-  const d = await draftFor(todo);
+  // 开了直接发：查了 ACK_AFTER_MS 还没查完，先替我回对方一句，别让人干等
+  const ack = cfg.autoSend ? setTimeout(() => ackWaiting(todo.at(-1)).catch((e) => log('ERR ack', e.message)), ACK_AFTER_MS) : null;
+  let d;
+  try { d = await draftFor(todo); } finally { clearTimeout(ack); }
   if (!d) return;
   if (d.res.kind === 'skip') return log('skip', d.res.summary, d.orig.message_id);
-  if (await alreadyReplied(todo.at(-1))) return log('skip', '处理期间已回复', d.orig.message_id);
-  // 影子期：放手的话这条会怎么发（Claude 提议，硬规则只往严里改）
+  // 放手的话这条怎么发：Claude 提议，硬规则只往严里改
   const reasons = holds(d.res, { commands: sessionCommands(d.res.cwd, d.res.session), firstContact: d.firstContact,
     leader: LEADERS.includes(d.orig.sender_name), external: externalChats().has(d.orig.chat_id) });
   d.res.shadow = { category: d.res.category || '其他', proposed: d.res.send_tier, tier: finalTier(d.res, reasons), reasons };
-  await postDraft({ orig: d.orig }, d.res);
+  // 查的时候我已经亲自回了：卡照样出（查到的东西、接着聊的入口都在），直接收起成「已在原会话回」，我在卡下说话就接着办
+  const mine = await myOwnReplies(todo.at(-1));
+  if (mine.length) {
+    const id = await postDraft({ orig: d.orig }, d.res);
+    const it = state.items[id];
+    it.status = 'handled';
+    saveState();
+    recordEvent('manual-reply', { card: id, orig: it.orig, draft: it.draft || '', actual: mine.slice(0, 3).map((x) => x.content) });
+    outcome(id, it, 'self');
+    refreshCard(id, `卡出来之前你已经回了：${cut(mine[0].content, 120)}\n查到的在折叠里；要接着办就在这张卡下说`);
+    return log('handled', `处理期间已回复，卡收起 ${d.orig.sender_name} ${id}`);
+  }
+  const id = await postDraft({ orig: d.orig }, d.res);
+  // 判定「直接发」的：不等我确认，带署名以我的身份发出去，卡片原地改成「已直接发」（我点「发送」的不带署名）
+  if (cfg.autoSend && autoSendable(d.res, d.res.shadow)) await sendReply(state.items[id], id, { auto: true });
+}
+
+// 先回的那句：只在私聊，不是我本人看过的，带署名；同一会话 2 小时内回过就不再回；只回在等我查 / 办事的（「你休息了嘛」这种查得再久也不回「我看一下」）
+const acks = new Map(); // 原消息 id → 先回的时间，出卡时写在卡上
+const WAIT_SCHEMA = JSON.stringify({ type: 'object', properties: { waiting: { type: 'boolean' } }, required: ['waiting'] });
+async function waitingOnMe(m) {
+  const r = await run(CLAUDE, ['-p', `飞书上${m.sender?.name || '有人'}发给${cfg.name}：「${cut(m.content || '', 600)}」\n\n他是不是在等${cfg.name}查一件事、给一个结论或者办一件事（报错、排查、请求、要数据、要开通）？闲聊、问候、问在不在、通知、确认、感谢都不算。`,
+    '--output-format', 'json', '--json-schema', WAIT_SCHEMA, '--tools', '', '--max-turns', '2'], { cwd: WORKSPACE, timeout: 90_000 });
+  try { const j = JSON.parse(r.out); recordEvent('cost', { what: 'ack', usd: j.total_cost_usd ?? null, session: j.session_id }); return j.structured_output?.waiting === true; } catch { return false; }
+}
+async function ackWaiting(m) {
+  if (!ackAllowed({ events: recentEvents(), chatId: m.chat_id, chatType: m.chat_type, now: Date.now(), leader: LEADERS.includes(m.sender?.name), external: externalChats().has(m.chat_id) })) return;
+  if (await alreadyReplied(m)) return;
+  if (!(await waitingOnMe(m))) return log('ack', `不是在等我办事，不先回 ${m.sender?.name} ${m.message_id}`);
+  const text = signed(ACK_TEXT, cfg.autoSignature);
+  const args = ['im', '+messages-reply', '--as', 'user', '--message-id', m.message_id, '--text', text, ...(m.thread_id ? ['--reply-in-thread'] : [])];
+  let d;
+  try { d = await lark(args); } catch (e) { if (isExternalDenied(e)) return log('ack', '外部会话，不先回', m.message_id); throw e; }
+  state.seen[d.message_id] = Date.now();
+  recordEvent('ack', { orig: { message_id: m.message_id, chat_id: m.chat_id, sender_name: m.sender?.name }, chat_id: m.chat_id, text, message_id: d.message_id });
+  acks.set(m.message_id, minuteBJ(Date.now()).slice(11));
+  log('ack', `先回了 ${m.sender?.name} ${m.message_id}`);
 }
 
 // 待处理的卡：我已经在原会话亲自回了 → 收起（卡上点个 ✅，不再轮询它的话题），并记下「草稿 vs 我实际怎么回的」给每日记忆用
@@ -709,7 +799,7 @@ async function closeHandled() {
 
 // 外部会话（以我身份发不了、走过网页版或手动发的）：放手发也要等我
 const externalChats = () => new Set([
-  ...recentEvents().filter((e) => e.kind === 'manual' || e.via === 'web').map((e) => e.orig?.chat_id || (String(e.to).startsWith('oc_') ? e.to : null)),
+  ...recentEvents().filter((e) => e.kind === 'manual' || ['web', 'desktop'].includes(e.via)).map((e) => e.orig?.chat_id || (String(e.to).startsWith('oc_') ? e.to : null)),
   ...Object.values(state.items).filter((it) => it.status === 'manual').map((it) => it.orig?.chat_id)].filter(Boolean));
 
 // ---------- 卡片按钮：机器人应用的长连接收点击回调（一个应用只能有一个进程在收） ----------
@@ -733,9 +823,11 @@ async function onClick(line) {
   const c = parseClick(ev, ME_BOT);
   if (!c || clicksSeen.has(c.id)) return;
   clicksSeen.add(c.id);
+  if (c.action === 'task_start' || c.action === 'task_done') return onTaskClick(c).catch((e) => { log('ERR task', e.message); botReply(c.card, `❌ ${e.message}`).catch(() => {}); });
   const item = state.items[c.card];
   if (!item) return; // 预览卡、老卡
   log('click', `${c.action} ${item.orig.sender_name} ${c.card}`);
+  if (c.action === 'task') return addTask(item, c.card, c.note).catch((e) => { log('ERR task', e.message); botReply(c.card, `❌ ${e.message}`).catch(() => {}); });
   try {
     if (item.status === 'working') { if (c.note) { (item.queued ||= []).push({ kind: 'say', text: c.note }); saveState(); } return; }
     if (c.action === 'keep') { // 答应了还没做的：交给原会话去做，做完告诉对方
@@ -765,6 +857,53 @@ async function onClick(line) {
     return await work(item, c.card, text, `${cfg.name}在草稿卡片上点了「按我说的办」，吩咐：「${text}」${edited ? `\n他把拟发送改成了：「${draft}」` : ''}`);
   } catch (e) { log('ERR click', e.message); botReply(c.card, `❌ ${e.message}`).catch(() => {}); }
 }
+
+// ---------- 任务：要开发的事记进清单，我自己开会话干 ----------
+const readTasks = () => jsonl(TASKS);
+const appendTask = (r) => fs.appendFileSync(TASKS, JSON.stringify({ at: Date.now(), ...r }) + '\n');
+const larkJson = async (args) => { const r = await run(LARK, args); try { return JSON.parse(r.out.slice(r.out.indexOf('{'))); } catch { return { ok: false, error: (r.err || r.out).slice(0, 300) }; } };
+
+// 加任务：建飞书任务（指给我、放进清单），在原卡下挂一张任务卡。这件事的卡不动，回不回对方照常
+async function addTask(item, cardId, note = '') {
+  const dup = taskState(readTasks()).find((t) => t.from === cardId && t.status !== 'done');
+  if (dup) return botReply(cardId, `这件事已经在任务里了：${dup.title}`);
+  const t = taskFrom(item, note);
+  if (!t.title) return botReply(cardId, '没看出要做什么，在卡下说「加任务 要做什么」');
+  const d = await larkJson(['task', '+create', '--as', 'user', '--summary', t.title, '--description', taskText(t, item.orig, { name: cfg.name }).slice(0, 3000),
+    '--assignee', ME, ...(cfg.taskListId ? ['--tasklist-id', cfg.taskListId] : [])]);
+  if (!d.ok) throw new Error(`建飞书任务失败：${JSON.stringify(d.error).slice(0, 200)}`);
+  const task = { id: crypto.randomUUID(), from: cardId, orig: item.orig, ...t, guid: d.data?.guid || d.data?.task?.guid, url: d.data?.url || d.data?.task?.url || '' };
+  const card = await botReplyCard(cardId, taskCard({ ...task, status: 'open' }, item.orig));
+  appendTask({ op: 'add', ...task, card: card.message_id });
+  log('task', `加了 ${t.title} ← ${item.orig.sender_name} ${cardId}`);
+}
+
+// 任务卡上的按钮：开工 = 给这个仓库开一个 Orca worktree 起 Claude（不切走我当前的窗口）；完成 = 勾掉飞书任务
+async function onTaskClick(c) {
+  const t = taskByCard(readTasks(), c.card);
+  if (!t) return;
+  log('click', `${c.action} ${t.title} ${c.card}`);
+  if (c.action === 'task_done') {
+    if (t.status === 'done') return;
+    if (t.guid) { const d = await larkJson(['task', '+complete', '--as', 'user', '--task-id', t.guid]); if (!d.ok) log('ERR task-complete', JSON.stringify(d.error).slice(0, 200)); }
+    appendTask({ op: 'done', id: t.id });
+    return patchCard(c.card, taskCard({ ...t, status: 'done' }, t.orig));
+  }
+  if (t.status !== 'open') return botReply(c.card, `已经开工了${t.worktree ? `：Orca 的 worktree「${t.worktree}」` : ''}`);
+  const orca = await launcherFor(run, ORCA);
+  if (!orca) return botReply(c.card, 'Orca 没开，开不了会话。开了 Orca 再点一次');
+  const repos = (await orcaJson(orca, ['repo', 'list', '--json'])).result?.repos || [];
+  const repo = repoFor(t.repo, repos);
+  if (!repo) return botReply(c.card, `「${t.repo || '（没写仓库）'}」不在 Orca 的仓库里。在卡下说「加任务 仓库是 xxx …」重新加一个，或者自己开会话；任务描述在[飞书任务](${t.url})里`);
+  const name = worktreeName(t.title);
+  const r = await run(orca, ['worktree', 'create', '--repo', `id:${repo.id}`, '--name', name, '--no-parent', '--agent', 'claude', '--comment', t.title,
+    '--prompt', startPrompt(t, t.orig, { taskUrl: t.url, name: cfg.name }), '--json'], { timeout: 180_000 });
+  if (r.code !== 0) throw new Error(`Orca 开 worktree 失败：${(r.err || r.out).slice(0, 200)}`);
+  appendTask({ op: 'start', id: t.id, worktree: name });
+  await patchCard(c.card, taskCard({ ...t, status: 'started', worktree: name }, t.orig));
+  log('task', `开工 ${t.title} → ${repo.path} ${name}`);
+}
+const orcaJson = async (orca, args) => { const r = await run(orca, args); try { return JSON.parse(r.out.slice(r.out.indexOf('{'))); } catch { return {}; } };
 
 // ---------- 记忆日报卡：「1 3 确认，2 删，5 结」 ----------
 const readDigest = (id) => { try { return JSON.parse(fs.readFileSync(`${DIGESTS}/${id}.json`, 'utf8')); } catch { return null; } };

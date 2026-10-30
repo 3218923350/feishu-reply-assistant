@@ -36,6 +36,26 @@ def open_commitments(log):
     fmt = lambda ms: (dt.datetime.fromtimestamp(ms / 1000, dt.timezone.utc) + dt.timedelta(hours=8)).strftime('%m-%d %H:%M')
     return [f"对{r.get('toName', '?')}：{r.get('what', '')}（{fmt(r['at'])}）" for r in log if r.get('op') == 'add' and r['id'] not in closed]
 
+def open_tasks(log):
+    """任务清单（回复助手 tasks.jsonl：add / start / done）里还没完成的 → 「标题（待开发 / 开工了）」"""
+    st = {}
+    for r in log:
+        if r.get('op') == 'add': st[r['id']] = dict(r, status='open')
+        elif r.get('id') in st: st[r['id']]['status'] = {'start': 'started', 'done': 'done'}.get(r.get('op'), st[r['id']]['status'])
+    return [t for t in st.values() if t['status'] != 'done']
+
+def sync_done(tasks, log_file, lark):
+    """在飞书里直接勾掉的任务：记一条 done，不再列"""
+    left = []
+    for t in tasks:
+        r = subprocess.run([lark, 'task', 'tasks', 'get', '--as', 'user', '--task-guid', t['guid']], capture_output=True, text=True) if t.get('guid') else None
+        try: done = r is not None and (json.loads(r.stdout[r.stdout.index('{'):])['data']['task'].get('completed_at') or '0') != '0'
+        except Exception: done = False
+        if done:
+            with open(log_file, 'a') as f: f.write(json.dumps({'op': 'done', 'id': t['id'], 'at': int(dt.datetime.now().timestamp() * 1000)}) + '\n')
+        else: left.append(t)
+    return left
+
 def numbered(pending, overdue, cap=30):
     """待确认在前、到期事项在后，连续编号 → (卡片文字, 编号表)"""
     items, parts = [], []
@@ -98,6 +118,9 @@ def main(day, status):
     if updated: parts.append(f'**追加 {len(updated)} 条**\n{lst(updated)}')
     if review_md: parts.append(review_md)
     if conflicts: parts.append(f'**说法冲突 {len(conflicts)} 条**（Claude Code 里看两条原文再定）\n{lst(conflicts)}')
+    tasks_file = Path(cfg['home']) / 'tasks.jsonl'
+    tasks = sync_done(open_tasks(fra_config.read_jsonl(tasks_file)), tasks_file, fra_config.bin_path('lark-cli'))
+    if tasks: parts.append(f'**任务清单里还没做完的 {len(tasks)} 个**（去任务卡点「开工」或「完成」）\n' + lst([f"{t['title']}（{'开工了' if t['status'] == 'started' else '待开发'}）" for t in tasks]))
     owed = open_commitments(fra_config.read_jsonl(COMMITS))
     if owed: parts.append(f'**以你身份答应了、还没做的 {len(owed)} 条**（去那张卡点「去做」，或在卡下说「不做了」）\n{lst(owed)}')
     md = '\n\n'.join(parts)

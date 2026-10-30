@@ -46,3 +46,10 @@ test('办事提示词：名字在拼模板时就填好；对方消息里的 {{ab
     for (const s of [w, p, approvePrompt([{ id: 'a', label: '开白名单' }], ['a'], '好了', '李四').intro]) assert.ok(!s.replaceAll('{{about_me}}', '').replaceAll('就说 {{name}}', '').includes('{{'), s);
   } finally { owner.name = prev; }
 });
+
+test('办事提示词：只说让办的事和结果，不替我主动提议或答应新东西', async () => {
+  const { workPrompt } = await import('../lib/commands.mjs');
+  const p = workPrompt('给他充一万', '/r.json');
+  assert.match(p, /不要替他主动提议、答应他没说的事/);
+  assert.ok(!p.includes('2–5 句'));
+});
