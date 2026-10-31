@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { hasTask, openTasks, plainLinks, repoFor, startPrompt, taskByCard, taskFrom, taskState, taskText, worktreeName } from '../lib/tasks.mjs';
+import { hasTask, openTasks, origResources, plainLinks, repoFor, startPrompt, taskByCard, taskFrom, taskState, taskText, worktreeName } from '../lib/tasks.mjs';
 import { draftCard, parseClick, taskCard } from '../lib/cards.mjs';
 
 const orig = { sender_name: '李四', chat_name: '', create_time: '2026-10-30 10:00', content: '调接口一直 500', link: 'https://applink/x' };
@@ -67,6 +67,14 @@ test('任务卡：待开发有「开工」「完成」，开工了只剩「完�
 });
 
 test('飞书任务描述：消息里的图片、附件这类非 http 链接换成文字（飞书会报 url in description is invalid）', () => {
-  assert.equal(plainLinks('看图 ![Image](img_v3_0216v_8f75) 和 [文件](file_v3_x) 还有 [文档](https://a.cn)'), '看图 [图片] 和 文件 还有 [文档](https://a.cn)');
+  assert.equal(plainLinks('看图 ![Image](img_v3_0216v_8f75) 和 [文件](file_v3_x) 还有 [文档](https://a.cn)'), '看图 [图片，见附件] 和 文件 还有 [文档](https://a.cn)');
   assert.equal(plainLinks('[原消息](applink://x)'), '[原消息](applink://x)');
+});
+
+test('原消息里的图片和文件：认出 key 和类型，同一个只算一次', () => {
+  const c = '看 ![Image](img_v3_0216v_8f75486a-b4fd) 和 [Image: img_v3_0216v_8f75486a-b4fd] <file key="file_v3_0016v_aee2" name="kimi 404.md"/>';
+  assert.deepEqual(origResources(c), [{ key: 'file_v3_0016v_aee2', type: 'file', name: 'kimi 404.md' }, { key: 'img_v3_0216v_8f75486a-b4fd', type: 'image', name: 'f75486a-b4fd.png' }]);
+  assert.deepEqual(origResources('没有附件'), []);
+  assert.match(startPrompt({ title: 't' }, { sender_name: 'a', content: c, message_id: 'om_1' }), /messages-resources-download .*--message-id om_1/);
+  assert.ok(!startPrompt({ title: 't' }, { sender_name: 'a', content: '纯文字', message_id: 'om_1' }).includes('resources-download'));
 });

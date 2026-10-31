@@ -24,7 +24,7 @@ import { makeAlerter } from './lib/alert.mjs';
 import { launcherFor, orcaBin } from './lib/orca.mjs';
 import { alive, lastTalkAt, launchWork, staleWork, workCostOnce, workProcs } from './lib/work.mjs';
 import { ackAllowed, autoSendable, msgArgs, signed, unfinished } from './lib/autosend.mjs';
-import { plainLinks, repoFor, startPrompt, taskByCard, taskFrom, taskState, taskText, worktreeName } from './lib/tasks.mjs';
+import { origResources, plainLinks, repoFor, startPrompt, taskByCard, taskFrom, taskState, taskText, worktreeName } from './lib/tasks.mjs';
 
 let cfg;
 try { cfg = loadConfig(); } catch (e) { if (!(e instanceof ConfigError)) throw e; console.error(e.message); process.exit(1); }
@@ -1021,7 +1021,7 @@ async function onClick(line) {
 // ---------- 任务：要开发的事记进清单，我自己开会话干 ----------
 const readTasks = () => jsonl(TASKS);
 const appendTask = (r) => fs.appendFileSync(TASKS, JSON.stringify({ at: Date.now(), ...r }) + '\n');
-const larkJson = async (args) => { const r = await run(LARK, args); try { return JSON.parse(r.out.slice(r.out.indexOf('{'))); } catch { return { ok: false, error: (r.err || r.out).slice(0, 300) }; } };
+const larkJson = async (args, cwd) => { const r = await run(LARK, args, cwd ? { cwd } : {}); try { return JSON.parse(r.out.slice(r.out.indexOf('{'))); } catch { return { ok: false, error: (r.err || r.out).slice(0, 300) }; } };
 
 // 加任务：建飞书任务（指给我、放进清单），在原卡下挂一张任务卡。这件事的卡不动，回不回对方照常
 async function addTask(item, cardId, note = '') {
@@ -1033,9 +1033,31 @@ async function addTask(item, cardId, note = '') {
     '--assignee', ME, ...(cfg.taskListId ? ['--tasklist-id', cfg.taskListId] : [])]);
   if (!d.ok) throw new Error(`建飞书任务失败：${JSON.stringify(d.error).slice(0, 200)}`);
   const task = { id: crypto.randomUUID(), from: cardId, orig: item.orig, ...t, guid: d.data?.guid || d.data?.task?.guid, url: d.data?.url || d.data?.task?.url || '' };
+  task.attachments = await attachResources(task.guid, item.orig);
   const card = await botReplyCard(cardId, taskCard({ ...task, status: 'open' }, item.orig));
   appendTask({ op: 'add', ...task, card: card.message_id });
   log('task', `加了 ${t.title} ← ${item.orig.sender_name} ${cardId}`);
+}
+
+// 原消息里的图片、文件下载下来挂到飞书任务上（连发的几条挨个试是哪条的）；挂不上的记日志，不影响任务本身
+async function attachResources(guid, orig) {
+  const res = origResources(orig.content);
+  if (!guid || !res.length) return 0;
+  const dir = fs.mkdtempSync(path.join(RUNS, 'task-att-'));
+  let n = 0;
+  for (const r of res) {
+    const name = r.name.replace(/[\/\\]/g, '_') || r.key;
+    let got = false;
+    for (const mid of orig.burst || [orig.message_id]) {
+      const dl = await larkJson(['im', '+messages-resources-download', '--as', 'user', '--message-id', mid, '--file-key', r.key, '--type', r.type, '--output', name], dir);
+      if (dl.ok && fs.existsSync(path.join(dir, name))) { got = true; break; }
+    }
+    if (!got) { log('ERR task-att', `下载不到 ${r.key}`); continue; }
+    const up = await larkJson(['task', '+upload-attachment', '--as', 'user', '--resource-id', guid, '--file', name], dir);
+    if (up.ok) n++; else log('ERR task-att', `${name} 挂不上：${JSON.stringify(up.error).slice(0, 160)}`);
+  }
+  fs.rmSync(dir, { recursive: true, force: true });
+  return n;
 }
 
 // 任务卡上的按钮：开工 = 给这个仓库开一个 Orca worktree 起 Claude（不切走我当前的窗口）；完成 = 勾掉飞书任务
