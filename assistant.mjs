@@ -24,7 +24,7 @@ import { makeAlerter } from './lib/alert.mjs';
 import { launcherFor, orcaBin } from './lib/orca.mjs';
 import { alive, lastTalkAt, launchWork, staleWork, workCostOnce, workProcs } from './lib/work.mjs';
 import { ackAllowed, autoSendable, msgArgs, signed, unfinished } from './lib/autosend.mjs';
-import { repoFor, startPrompt, taskByCard, taskFrom, taskState, taskText, worktreeName } from './lib/tasks.mjs';
+import { plainLinks, repoFor, startPrompt, taskByCard, taskFrom, taskState, taskText, worktreeName } from './lib/tasks.mjs';
 
 let cfg;
 try { cfg = loadConfig(); } catch (e) { if (!(e instanceof ConfigError)) throw e; console.error(e.message); process.exit(1); }
@@ -1029,7 +1029,7 @@ async function addTask(item, cardId, note = '') {
   if (dup) return botReply(cardId, `这件事已经在任务里了：${dup.title}`);
   const t = taskFrom(item, note);
   if (!t.title) return botReply(cardId, '没看出要做什么，在卡下说「加任务 要做什么」');
-  const d = await larkJson(['task', '+create', '--as', 'user', '--summary', t.title, '--description', taskText(t, item.orig, { name: cfg.name }).slice(0, 3000),
+  const d = await larkJson(['task', '+create', '--as', 'user', '--summary', t.title, '--description', plainLinks(taskText(t, item.orig, { name: cfg.name })).slice(0, 3000),
     '--assignee', ME, ...(cfg.taskListId ? ['--tasklist-id', cfg.taskListId] : [])]);
   if (!d.ok) throw new Error(`建飞书任务失败：${JSON.stringify(d.error).slice(0, 200)}`);
   const task = { id: crypto.randomUUID(), from: cardId, orig: item.orig, ...t, guid: d.data?.guid || d.data?.task?.guid, url: d.data?.url || d.data?.task?.url || '' };
