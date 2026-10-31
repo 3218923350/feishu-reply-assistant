@@ -42,7 +42,8 @@ class Review(unittest.TestCase):
         self.assertIn('[我直接打字回]', md)
 
     def test_redact(self):
-        self.assertNotIn('FAKEfakeFAKEfake0000', daily_review.redact('key ' + 'sk_' + 'live_' + 'FAKEfakeFAKEfake0000000000abcd 给你')  # 拼出来：别让扫描器把测试里的假 key 当真的)
+        fake = 'sk_' + 'live_' + 'FAKEfakeFAKEfake0000000000abcd'  # 拼出来：别让扫描器把测试里的假 key 当真的
+        self.assertNotIn('FAKEfakeFAKEfake0000', daily_review.redact(f'key {fake} 给你'))
 
 if __name__ == '__main__':
     unittest.main()
